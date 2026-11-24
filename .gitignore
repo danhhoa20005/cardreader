@@ -1,18 +1,19 @@
+# Cấu hình IDE cá nhân và tệp hệ điều hành
 *.iml
-.gradle
-.kotlin
-/local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
+.idea/
+.vscode/
 .DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
+
+# Thư mục build và bộ nhớ đệm của Gradle / Kotlin / Android
+.gradle/
+.kotlin/
+/build/
+/captures/
+.externalNativeBuild/
+.cxx/
+
+# Cấu hình máy cục bộ, khóa ký APK và tệp nháp tạm thời
+/local.properties
 local.properties
 keystore.properties
 *.jks
