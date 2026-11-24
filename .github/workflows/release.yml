@@ -41,7 +41,7 @@ jobs:
           echo "version_code=${CODE}" >> "$GITHUB_OUTPUT"
 
       - name: Run unit tests
-        run: ./gradlew testDebugUnitTest
+        run: chmod +x gradlew && ./gradlew testDebugUnitTest
 
       - name: Decode release keystore
         env:
