@@ -3,6 +3,8 @@ package com.example.cardreader
 import android.app.AlertDialog
 import android.content.Intent
 import android.content.res.Configuration
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.net.Uri
 import android.os.Bundle
 import android.os.CountDownTimer
@@ -10,6 +12,7 @@ import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
+import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
@@ -22,6 +25,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.fragment.app.FragmentActivity
+import java.io.ByteArrayOutputStream
 import java.net.URI
 
 /**
@@ -463,9 +467,61 @@ class MainActivity : FragmentActivity(), RemoteScreenListener {
             putExtra("username", settings.username)
             putExtra("password", settings.password)
             putExtra("target_url", settings.targetUrl)
+            if (settings.autoEnterCheckInPage) {
+                putExtra("initial_route", "/check-in-out")
+            }
         }
         startActivity(intent)
         finish()
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        val editingInput = etUsername.hasFocus() || etPassword.hasFocus()
+        val dev = event.device
+        if (!editingInput && dev != null && !dev.isVirtual) {
+            if (AppConfig.load(this).hardwareRfidEnabled) {
+                val isEnter = keyCode == KeyEvent.KEYCODE_ENTER ||
+                    keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
+                val isBackspace = keyCode == KeyEvent.KEYCODE_DEL
+                val uni = event.unicodeChar
+                val ch = if (uni > 0) uni.toChar() else null
+                if (isEnter || isBackspace || (ch != null && RfidScannerBuffer.isAllowedCardChar(ch))) {
+                    val scanned = RemoteControlHub.rfidBuffer.onKeyChar(
+                        keyChar = ch,
+                        isEnter = isEnter,
+                        isBackspace = isBackspace,
+                        eventTimeMs = event.eventTime
+                    )
+                    if (scanned != null) {
+                        RemoteControlHub.dispatchHardwareRfidCardAsync(scanned, source = "USB_HID")
+                        return true
+                    }
+                }
+            }
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onCaptureScreenshotJpeg(): ByteArray? {
+        if (isFinishing || isDestroyed) return null
+        val targetView = window?.decorView?.rootView ?: return null
+        val srcW = targetView.width
+        val srcH = targetView.height
+        if (srcW <= 0 || srcH <= 0) return null
+        val scale = minOf(1f, 960f / maxOf(srcW, srcH).toFloat())
+        val dstW = (srcW * scale).toInt().coerceAtLeast(1)
+        val dstH = (srcH * scale).toInt().coerceAtLeast(1)
+        val bitmap = Bitmap.createBitmap(dstW, dstH, Bitmap.Config.RGB_565)
+        return try {
+            val canvas = Canvas(bitmap)
+            canvas.scale(scale, scale)
+            targetView.draw(canvas)
+            val out = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 72, out)
+            out.toByteArray()
+        } finally {
+            bitmap.recycle()
+        }
     }
 
     override fun onRemoteConfigUpdated(settings: AppSettings) {

@@ -8,6 +8,7 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
+import java.net.URLDecoder
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -21,30 +22,41 @@ data class HttpRequestData(
     val headers: Map<String, String>,
     val body: String,
     val clientIp: String = "127.0.0.1",
-    val bodyTooLarge: Boolean = false
+    val bodyTooLarge: Boolean = false,
+    val queryParams: Map<String, String> = emptyMap()
 )
 
 data class HttpResponseData(
     val statusCode: Int,
     val statusText: String,
     val contentType: String,
-    val body: String,
-    val extraHeaders: Map<String, String> = emptyMap()
+    val body: String = "",
+    val extraHeaders: Map<String, String> = emptyMap(),
+    val bodyBytes: ByteArray? = null
 )
 
 interface ControlServerDelegate {
     fun getAdminPin(): String
+    fun isLocalhostBypassEnabled(): Boolean = false
     fun buildStatusJson(authorized: Boolean): JSONObject
     fun handleConfigUpdate(json: JSONObject): JSONObject
     fun handleRemoteCommand(action: String): JSONObject
     fun handleUpdateCheck(): JSONObject = JSONObject().put("ok", false)
     fun handleUpdateInstall(): JSONObject = JSONObject().put("ok", false)
+    fun handleWebLogin(json: JSONObject): JSONObject = JSONObject().put("ok", false)
+    fun handleWebLogout(): JSONObject = JSONObject().put("ok", false)
+    fun handleWebNavigate(json: JSONObject): JSONObject = JSONObject().put("ok", false)
+    fun handleWebAction(json: JSONObject): JSONObject = JSONObject().put("ok", false)
+    fun captureScreenJpeg(): ByteArray? = null
+    fun handleRfidScan(cardId: String, mode: String, source: String): JSONObject = JSONObject().put("ok", false)
+    fun handleRfidHistory(limit: Int): JSONObject = JSONObject().put("ok", true)
+    fun handleRfidClear(): JSONObject = JSONObject().put("ok", true)
+    fun handleRfidKnownCards(): JSONObject = JSONObject().put("ok", false)
 }
 
 /**
- * Máy chủ HTTP/1.1 nội bộ chạy trên cổng 8888 phục vụ điều khiển TV Box qua mạng LAN.
- * Hỗ trợ xác thực PIN an toàn thời gian hằng (constant-time), giới hạn tốc độ chống dò PIN,
- * thời hạn phiên (TTL 24h) và kiểm tra kích thước payload.
+ * Máy chủ HTTP/1.1 nội bộ chạy trên cổng 8888 phục vụ điều khiển toàn diện qua localhost và mạng LAN,
+ * tích hợp API đọc thẻ RFID thời gian thực, điều hướng mọi chức năng điểm danh và chụp màn hình trực tiếp.
  */
 class LocalControlServer(
     private val port: Int,
@@ -68,7 +80,7 @@ class LocalControlServer(
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
-        workerPool = Executors.newFixedThreadPool(8)
+        workerPool = Executors.newFixedThreadPool(12)
 
         val thread = Thread({
             var bound: ServerSocket? = null
@@ -102,7 +114,7 @@ class LocalControlServer(
             }
 
             serverSocket = ss
-            onLog("Web điều khiển LAN đang lắng nghe trên cổng ${ss.localPort}")
+            onLog("Máy chủ điều khiển & tích hợp RFID đang lắng nghe tại cổng ${ss.localPort}")
 
             while (running.get() && !ss.isClosed) {
                 val client = try {
@@ -143,7 +155,7 @@ class LocalControlServer(
                 val clientIp = sock.inetAddress?.hostAddress ?: "unknown"
                 val req = parseHttpRequest(BufferedInputStream(sock.getInputStream()), clientIp) ?: return
                 val resp = routeRequest(req)
-                writeHttpResponse(sock.getOutputStream(), resp)
+                writeHttpResponse(sock.getOutputStream(), resp, corsHeadersFor(req))
             }
         }
     }
@@ -174,6 +186,8 @@ class LocalControlServer(
                     put("ok", true)
                     put("port", if (boundPort > 0) boundPort else port)
                     put("versionName", BuildConfig.VERSION_NAME)
+                    put("rfidEndpoint", "/api/rfid/scan")
+                    put("localhostClient", isLoopbackAddress(req.clientIp))
                 }
                 jsonResponse(200, "OK", health)
             }
@@ -252,6 +266,105 @@ class LocalControlServer(
                 jsonResponse(200, "OK", result)
             }
 
+            req.method == "POST" && req.path == "/api/web/login" -> {
+                if (!authorized) return unauthorizedResponse()
+                val json = if (req.body.isBlank()) {
+                    JSONObject()
+                } else {
+                    runCatching { JSONObject(req.body) }.getOrNull()
+                        ?: return badRequestResponse("Payload JSON không hợp lệ")
+                }
+                jsonResponse(200, "OK", delegate.handleWebLogin(json))
+            }
+
+            req.method == "POST" && req.path == "/api/web/logout" -> {
+                if (!authorized) return unauthorizedResponse()
+                jsonResponse(200, "OK", delegate.handleWebLogout())
+            }
+
+            (req.method == "POST" || req.method == "GET") && req.path == "/api/web/navigate" -> {
+                if (!authorized) return unauthorizedResponse()
+                val json = if (req.method == "GET") {
+                    JSONObject().apply {
+                        req.queryParams["route"]?.let { put("route", it) }
+                        req.queryParams["url"]?.let { put("url", it) }
+                    }
+                } else {
+                    runCatching { JSONObject(req.body) }.getOrNull()
+                        ?: return badRequestResponse("Payload JSON không hợp lệ")
+                }
+                jsonResponse(200, "OK", delegate.handleWebNavigate(json))
+            }
+
+            req.method == "POST" && req.path == "/api/web/action" -> {
+                if (!authorized) return unauthorizedResponse()
+                val json = runCatching { JSONObject(req.body) }.getOrNull()
+                    ?: return badRequestResponse("Payload JSON không hợp lệ")
+                jsonResponse(200, "OK", delegate.handleWebAction(json))
+            }
+
+            req.method == "GET" && req.path == "/api/web/screenshot" -> {
+                if (!authorized) return unauthorizedResponse()
+                val bytes = delegate.captureScreenJpeg()
+                if (bytes == null || bytes.isEmpty()) {
+                    jsonResponse(
+                        503,
+                        "Service Unavailable",
+                        JSONObject().put("ok", false).put("message", "Màn hình chưa sẵn sàng để chụp")
+                    )
+                } else {
+                    HttpResponseData(
+                        statusCode = 200,
+                        statusText = "OK",
+                        contentType = "image/jpeg",
+                        bodyBytes = bytes
+                    )
+                }
+            }
+
+            (req.method == "POST" || req.method == "GET") && req.path == "/api/rfid/scan" -> {
+                if (!authorized) return unauthorizedResponse()
+                val json = if (req.method == "GET" || req.body.isBlank()) {
+                    JSONObject()
+                } else {
+                    runCatching { JSONObject(req.body) }.getOrNull()
+                        ?: return badRequestResponse("Payload JSON không hợp lệ")
+                }
+                val rawCard = json.optString("cardId", "")
+                    .ifBlank { json.optString("card", "") }
+                    .ifBlank { json.optString("uid", "") }
+                    .ifBlank { json.optString("code", "") }
+                    .ifBlank { req.queryParams["cardId"] ?: "" }
+                    .ifBlank { req.queryParams["card"] ?: "" }
+                    .ifBlank { req.queryParams["uid"] ?: "" }
+                    .ifBlank { req.queryParams["code"] ?: "" }
+                val cardId = RfidScannerBuffer.normalizeCardId(rawCard)
+                if (cardId.isEmpty()) {
+                    return badRequestResponse("Mã thẻ RFID không hợp lệ hoặc bị trống (chỉ cho phép 0-9, A-Z, _, -)")
+                }
+                val mode = json.optString("mode", req.queryParams["mode"] ?: "auto").lowercase()
+                val defaultSource = if (isLoopbackAddress(req.clientIp)) "LOCALHOST_API" else "LAN_API"
+                val source = json.optString("source", req.queryParams["source"] ?: defaultSource)
+                val res = delegate.handleRfidScan(cardId, mode, source)
+                jsonResponse(200, "OK", res)
+            }
+
+            req.method == "GET" && req.path == "/api/rfid/history" -> {
+                if (!authorized) return unauthorizedResponse()
+                val limit = req.queryParams["limit"]?.toIntOrNull()?.coerceIn(1, 100) ?: 50
+                jsonResponse(200, "OK", delegate.handleRfidHistory(limit))
+            }
+
+            req.method == "POST" && req.path == "/api/rfid/clear" -> {
+                if (!authorized) return unauthorizedResponse()
+                jsonResponse(200, "OK", delegate.handleRfidClear())
+            }
+
+            req.method == "GET" && req.path == "/api/rfid/cards" -> {
+                if (!authorized) return unauthorizedResponse()
+                jsonResponse(200, "OK", delegate.handleRfidKnownCards())
+            }
+
             req.method == "POST" && req.path == "/api/update/check" -> {
                 if (!authorized) return unauthorizedResponse()
                 jsonResponse(200, "OK", delegate.handleUpdateCheck())
@@ -273,8 +386,24 @@ class LocalControlServer(
     }
 
     private fun isAuthorized(req: HttpRequestData): Boolean {
+        if (delegate.isLocalhostBypassEnabled() && isLoopbackAddress(req.clientIp)) {
+            return true
+        }
         val pin = delegate.getAdminPin()
         if (pin.isEmpty()) return true
+
+        // Cho phép đầu đọc RFID hoặc script gửi kèm X-Admin-Pin trực tiếp trong 1 request
+        val headerPin = req.headers["x-admin-pin"]?.trim() ?: req.queryParams["pin"]?.trim()
+        if (!headerPin.isNullOrEmpty()) {
+            if (isRateLimited(req.clientIp)) return false
+            if (constantTimeEquals(headerPin, pin)) {
+                clearRateLimit(req.clientIp)
+                return true
+            }
+            recordAuthFailure(req.clientIp)
+            return false
+        }
+
         val token = extractToken(req) ?: return false
         val expiresAt = sessions[token] ?: return false
         if (clockMs() > expiresAt) {
@@ -339,6 +468,15 @@ class LocalControlServer(
         val headerToken = req.headers["x-admin-token"]?.trim()
         if (!headerToken.isNullOrEmpty()) return headerToken
 
+        val bearer = req.headers["authorization"]?.trim()
+        if (!bearer.isNullOrEmpty() && bearer.startsWith("Bearer ", ignoreCase = true)) {
+            val t = bearer.substring(7).trim()
+            if (t.isNotEmpty()) return t
+        }
+
+        val queryToken = req.queryParams["token"]?.trim()
+        if (!queryToken.isNullOrEmpty()) return queryToken
+
         val cookie = req.headers["cookie"] ?: return null
         for (part in cookie.split(';')) {
             val trimmed = part.trim()
@@ -349,11 +487,31 @@ class LocalControlServer(
         return null
     }
 
+    private fun corsHeadersFor(req: HttpRequestData): Map<String, String> {
+        val origin = req.headers["origin"]?.trim()
+        if (origin.isNullOrEmpty()) return emptyMap()
+        val allowOrigin = if (
+            origin.startsWith("http://localhost", ignoreCase = true) ||
+            origin.startsWith("http://127.0.0.1", ignoreCase = true) ||
+            origin.startsWith("http://[::1]", ignoreCase = true) ||
+            req.path.startsWith("/api/rfid/")
+        ) {
+            origin
+        } else {
+            return emptyMap()
+        }
+        return mapOf(
+            "Access-Control-Allow-Origin" to allowOrigin,
+            "Access-Control-Allow-Methods" to "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers" to "Content-Type, X-Admin-Token, X-Admin-Pin, Authorization"
+        )
+    }
+
     private fun unauthorizedResponse(): HttpResponseData {
         val body = JSONObject().apply {
             put("ok", false)
             put("locked", true)
-            put("message", "Cần nhập mã PIN quản trị")
+            put("message", "Cần nhập mã PIN quản trị (hoặc gửi kèm header X-Admin-Pin)")
         }
         return jsonResponse(401, "Unauthorized", body)
     }
@@ -382,13 +540,39 @@ class LocalControlServer(
     }
 
     companion object {
-        private const val CLIENT_TIMEOUT_MS = 10_000
+        private const val CLIENT_TIMEOUT_MS = 12_000
         private const val MAX_HEADER_BYTES = 16 * 1024
         private const val MAX_BODY_BYTES = 64 * 1024
         private const val SESSION_TTL_MS = 24L * 60L * 60L * 1000L
         private const val MAX_ACTIVE_SESSIONS = 32
         private const val MAX_AUTH_FAILURES = 5
         private const val AUTH_WINDOW_MS = 60_000L
+
+        internal fun isLoopbackAddress(ip: String): Boolean {
+            val cleaned = ip.trim().lowercase()
+            return cleaned == "127.0.0.1" ||
+                cleaned == "::1" ||
+                cleaned == "0:0:0:0:0:0:0:1" ||
+                cleaned == "::ffff:127.0.0.1" ||
+                cleaned == "localhost"
+        }
+
+        internal fun parseQueryParams(rawQuery: String): Map<String, String> {
+            if (rawQuery.isBlank()) return emptyMap()
+            val map = LinkedHashMap<String, String>()
+            for (pair in rawQuery.split('&')) {
+                if (pair.isBlank()) continue
+                val eq = pair.indexOf('=')
+                val rawKey = if (eq >= 0) pair.substring(0, eq) else pair
+                val rawVal = if (eq >= 0) pair.substring(eq + 1) else ""
+                val key = runCatching { URLDecoder.decode(rawKey, "UTF-8") }.getOrDefault(rawKey).trim()
+                val value = runCatching { URLDecoder.decode(rawVal, "UTF-8") }.getOrDefault(rawVal)
+                if (key.isNotEmpty()) {
+                    map[key] = value
+                }
+            }
+            return map
+        }
 
         internal fun parseHttpRequest(
             input: InputStream,
@@ -421,7 +605,10 @@ class LocalControlServer(
             val requestParts = lines[0].split(' ')
             if (requestParts.size < 2) return null
             val method = requestParts[0].uppercase()
-            val rawPath = requestParts[1].substringBefore('?')
+            val fullTarget = requestParts[1]
+            val rawPath = fullTarget.substringBefore('?')
+            val rawQuery = if ('?' in fullTarget) fullTarget.substringAfter('?') else ""
+            val queryParams = parseQueryParams(rawQuery)
 
             val headers = HashMap<String, String>()
             for (i in 1 until lines.size) {
@@ -435,7 +622,7 @@ class LocalControlServer(
 
             val rawLength = headers["content-length"]?.toLongOrNull() ?: 0L
             if (rawLength > MAX_BODY_BYTES) {
-                return HttpRequestData(method, rawPath, headers, "", clientIp, bodyTooLarge = true)
+                return HttpRequestData(method, rawPath, headers, "", clientIp, bodyTooLarge = true, queryParams = queryParams)
             }
 
             val contentLength = rawLength.toInt().coerceAtLeast(0)
@@ -452,27 +639,34 @@ class LocalControlServer(
                 ""
             }
 
-            return HttpRequestData(method, rawPath, headers, body, clientIp)
+            return HttpRequestData(method, rawPath, headers, body, clientIp, queryParams = queryParams)
         }
 
-        private fun writeHttpResponse(out: OutputStream, resp: HttpResponseData) {
-            val bodyBytes = resp.body.toByteArray(Charsets.UTF_8)
+        private fun writeHttpResponse(
+            out: OutputStream,
+            resp: HttpResponseData,
+            corsHeaders: Map<String, String> = emptyMap()
+        ) {
+            val payload = resp.bodyBytes ?: resp.body.toByteArray(Charsets.UTF_8)
             val sb = StringBuilder()
             sb.append("HTTP/1.1 ").append(resp.statusCode).append(' ').append(resp.statusText).append("\r\n")
             sb.append("Content-Type: ").append(resp.contentType).append("\r\n")
-            sb.append("Content-Length: ").append(bodyBytes.size).append("\r\n")
+            sb.append("Content-Length: ").append(payload.size).append("\r\n")
             sb.append("Cache-Control: no-store, no-cache\r\n")
             sb.append("X-Content-Type-Options: nosniff\r\n")
             sb.append("X-Frame-Options: DENY\r\n")
             sb.append("Referrer-Policy: no-referrer\r\n")
             sb.append("Connection: close\r\n")
+            for ((k, v) in corsHeaders) {
+                sb.append(k).append(": ").append(v).append("\r\n")
+            }
             for ((k, v) in resp.extraHeaders) {
                 sb.append(k).append(": ").append(v).append("\r\n")
             }
             sb.append("\r\n")
             out.write(sb.toString().toByteArray(Charsets.UTF_8))
-            if (bodyBytes.isNotEmpty()) {
-                out.write(bodyBytes)
+            if (payload.isNotEmpty()) {
+                out.write(payload)
             }
             out.flush()
         }

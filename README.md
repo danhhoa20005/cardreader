@@ -1,22 +1,43 @@
-# CardReader: Android Kiosk 24/7, Điều Khiển LAN (Cổng 8888) & Cập Nhật OTA GitHub
+# CardReader: Android Kiosk 24/7, Điều Khiển Toàn Diện Localhost/LAN (8888) & Tích Hợp Đầu Đọc RFID
 
-Ứng dụng Kiosk 24/7 tối ưu cho **Android TV Box** và **Điện thoại (Dọc & Ngang)** từ Android 6.0 đến Android 16 (`minSdk = 23`, `targetSdk = 35`), tự động kết nối và đăng nhập hệ thống Điểm danh / Đón trả học sinh (`http://diemdanhhs.com` & `https://dontrahs.com`), tích hợp bảng điều khiển nội bộ qua mạng LAN trên cổng **8888** và cập nhật OTA trực tiếp qua **GitHub Releases**.
+Ứng dụng Kiosk 24/7 tối ưu cho **Android TV Box** và **Điện thoại (Dọc & Ngang)** từ Android 6.0 đến Android 16 (`minSdk = 23`, `targetSdk = 35`), tự động kết nối hệ thống Điểm danh / Đón trả học sinh (`http://diemdanhhs.com` & `https://dontrahs.com`), tích hợp **Trung tâm Điều khiển & API Đầu đọc thẻ RFID trên `localhost:8888`** và cập nhật OTA trực tiếp qua **GitHub Releases**.
 
 ## Tính năng chính
 
-1. **Giao diện Thích ứng UI/UX Pro Max (`MainActivity` - Screen 1):**
-   - Bộ 3 bố cục tự động thích ứng: **Dọc (Portrait)** chuẩn 1 tay trên điện thoại, **Ngang 2 cột (Landscape)** trên điện thoại ngang, và **Màn hình lớn / D-Pad Remote** trên Android TV Box (`sw600dp`).
-   - Chọn nhanh 1 chạm giữa **`diemdanhhs.com`** và **`dontrahs.com`**, kiểm tra & cài bản cập nhật trực tiếp từ GitHub, đếm ngược 30 giây phụ thuộc trạng thái mạng.
+1. **Tích hợp Đầu đọc thẻ RFID Đa kênh (`RfidScannerBuffer` & `/api/rfid/scan`):**
+   - **Đầu đọc RFID phần cứng (USB / OTG / Bluetooth HID):** Bắt sự kiện quẹt thẻ trên mọi trang và tự động hiển thị kết quả điểm danh lên màn hình Kiosk kèm lưu lịch sử thời gian thực.
+   - **HTTP API trên `localhost:8888` (Tự động tin cậy `127.0.0.1` không cần mã PIN):** Cho phép mọi dịch vụ đọc thẻ RFID (Serial/COM, Python, C#, Node.js, vi điều khiển) gửi mã thẻ qua `POST /api/rfid/scan` hoặc `GET /api/rfid/scan?cardId=...` và nhận ngay kết quả đồng bộ từ máy chủ.
+   - **Đồng bộ danh sách mã thẻ của trường (`GET /api/rfid/cards`):** Tải danh sách thẻ RFID đã đăng ký và hỗ trợ quẹt thử 1 chạm trên Web Console.
 
-2. **Tự động hóa WebView 24/7 (`WebViewActivity` - Screen 2):**
-   - Giữ màn hình luôn sáng (`FLAG_KEEP_SCREEN_ON`), tự xoay dọc/ngang mượt không tải lại trang (`configChanges`).
-   - Sử dụng đúng kịch bản `setReactInputValue` chuẩn của bản gốc kết hợp khóa phiên một chiều để không bao giờ đăng nhập lặp lại sau khi tải trang.
+2. **Điều khiển Toàn bộ Chức năng từ `http://127.0.0.1:8888` & `http://diemdanh.local:8888`:**
+   - **Đăng nhập & Đổi hệ thống từ xa (`POST /api/web/login`, `POST /api/web/logout`):** Đăng nhập tức thì vào `diemdanhhs.com` hoặc `dontrahs.com`, tùy chọn tự mở thẳng **Trang Quẹt Thẻ (`/check-in-out`)**.
+   - **Chuyển đổi 1 chạm toàn bộ 17 phân hệ (`POST /api/web/navigate`):** Quẹt thẻ RFID, Tín hiệu toàn trường, Danh sách điểm danh/đón trả, Trạng thái điểm danh, Danh sách học sinh, Lớp học, Giáo viên, Quy định điểm danh, Cấu hình nhà trường, Đơn xin nghỉ...
+   - **Màn hình Trực tiếp Live View (`GET /api/web/screenshot` & `POST /api/web/action`):** Xem trực tiếp màn hình Kiosk trên trình duyệt và click chuột lên ảnh để chạm điều khiển từ xa, cuộn trang, bấm nút theo chữ hoặc nhập liệu.
 
-3. **Bảng Điều khiển Web LAN Cổng `8888` (`http://diemdanh.local:8888`):**
-   - Giao diện Operations Console thời gian thực: KPI Telemetry Strip, điều khiển tức thì, chọn nhanh máy chủ, lọc & sao chép nhật ký hoạt động, xác thực mã PIN an toàn (`SHA-256` constant-time + giới hạn tốc độ chống dò PIN).
+3. **Giao diện Thích ứng UI/UX Pro Max & Cập nhật OTA GitHub (`GitHubUpdater`):**
+   - Bộ 3 bố cục gốc cho Điện thoại Dọc, Điện thoại Ngang 2 cột và Android TV Box D-Pad.
+   - Kiểm tra, tải và cài đặt bản cập nhật APK mới trực tiếp từ `https://github.com/danhhoa20005/cardreader/releases/latest`.
 
-4. **Cập nhật Phần mềm OTA qua GitHub Releases (`GitHubUpdater`):**
-   - Kiểm tra phiên bản mới từ `https://api.github.com/repos/danhhoa20005/cardreader/releases/latest`, tải tệp APK hiển thị tiến trình `0% → 100%` và kích hoạt trình cài đặt qua `FileProvider` ngay trên thiết bị hoặc từ bảng điều khiển LAN.
+## Ví dụ Tích hợp Nhanh Đầu Đọc RFID Qua Localhost
+
+```bash
+# 1. Quẹt thẻ RFID từ dịch vụ trên localhost (POST hoặc GET):
+curl -X POST http://127.0.0.1:8888/api/rfid/scan \
+  -H "Content-Type: application/json" \
+  -d '{"cardId":"0012345678","mode":"auto"}'
+
+curl "http://127.0.0.1:8888/api/rfid/scan?cardId=0012345678"
+
+# 2. Đăng nhập tài khoản nhà trường và vào thẳng chế độ Quẹt thẻ (/check-in-out):
+curl -X POST http://127.0.0.1:8888/api/web/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"tai_khoan","password":"mat_khau","targetUrl":"http://diemdanhhs.com","route":"/check-in-out"}'
+
+# 3. Điều hướng tới phân hệ bất kỳ:
+curl -X POST http://127.0.0.1:8888/api/web/navigate \
+  -H "Content-Type: application/json" \
+  -d '{"route":"/danh-sach-diem-danh"}'
+```
 
 ## Lệnh Kiểm thử & Xuất bản APK Tự động Tăng Version
 

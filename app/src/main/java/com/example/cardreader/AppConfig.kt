@@ -9,7 +9,10 @@ data class AppSettings(
     val targetUrl: String,
     val mdnsHostname: String,
     val githubRepo: String,
-    val adminPin: String
+    val adminPin: String,
+    val autoEnterCheckInPage: Boolean = false,
+    val hardwareRfidEnabled: Boolean = true,
+    val allowLocalhostBypass: Boolean = true
 ) {
     fun hasCredentials(): Boolean = username.isNotEmpty() && password.isNotEmpty()
     fun hasAdminPin(): Boolean = adminPin.isNotEmpty()
@@ -25,6 +28,10 @@ object AppConfig {
     private const val KEY_ADMIN_PIN = "admin_pin"
     private const val KEY_OVERLAY_PROMPTED = "overlay_prompted"
     private const val KEY_LAST_WEB_USER = "last_web_user"
+    private const val KEY_AUTO_CHECKIN_PAGE = "auto_checkin_page"
+    private const val KEY_HARDWARE_RFID_ENABLED = "hardware_rfid_enabled"
+    private const val KEY_ALLOW_LOCALHOST_BYPASS = "allow_localhost_bypass"
+    private const val KEY_WEB_AUTH_TOKEN = "web_auth_token"
 
     private val HOSTNAME_REGEX =
         Regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
@@ -48,7 +55,10 @@ object AppConfig {
             mdnsHostname = normalizeMdnsHostname(mdnsRaw ?: BuildConfig.DEFAULT_MDNS_HOSTNAME),
             githubRepo = normalizeGithubRepo(repoRaw ?: BuildConfig.DEFAULT_GITHUB_REPO)
                 .ifEmpty { BuildConfig.DEFAULT_GITHUB_REPO },
-            adminPin = (p.getString(KEY_ADMIN_PIN, "") ?: "").trim()
+            adminPin = (p.getString(KEY_ADMIN_PIN, "") ?: "").trim(),
+            autoEnterCheckInPage = p.getBoolean(KEY_AUTO_CHECKIN_PAGE, false),
+            hardwareRfidEnabled = p.getBoolean(KEY_HARDWARE_RFID_ENABLED, true),
+            allowLocalhostBypass = p.getBoolean(KEY_ALLOW_LOCALHOST_BYPASS, true)
         )
     }
 
@@ -84,6 +94,13 @@ object AppConfig {
         prefs(context).edit().putString(KEY_LAST_WEB_USER, username.trim()).apply()
     }
 
+    fun getWebAuthToken(context: Context): String =
+        (prefs(context).getString(KEY_WEB_AUTH_TOKEN, "") ?: "").trim()
+
+    fun saveWebAuthToken(context: Context, token: String) {
+        prefs(context).edit().putString(KEY_WEB_AUTH_TOKEN, token.trim()).apply()
+    }
+
     fun isOverlayPrompted(context: Context): Boolean =
         prefs(context).getBoolean(KEY_OVERLAY_PROMPTED, false)
 
@@ -99,7 +116,10 @@ object AppConfig {
         mdnsHostname: String,
         githubRepo: String? = null,
         adminPin: String? = null,
-        clearAdminPin: Boolean = false
+        clearAdminPin: Boolean = false,
+        autoEnterCheckInPage: Boolean? = null,
+        hardwareRfidEnabled: Boolean? = null,
+        allowLocalhostBypass: Boolean? = null
     ): AppSettings {
         val current = load(context)
         val finalUser = username.trim()
@@ -120,6 +140,13 @@ object AppConfig {
             adminPin == null -> current.adminPin
             else -> adminPin.trim()
         }
+        val finalAutoCheckIn = autoEnterCheckInPage ?: current.autoEnterCheckInPage
+        val finalHwRfid = hardwareRfidEnabled ?: current.hardwareRfidEnabled
+        val finalLocalhostBypass = allowLocalhostBypass ?: current.allowLocalhostBypass
+
+        if (!current.username.equals(finalUser, ignoreCase = true) || current.targetUrl != finalTarget) {
+            saveWebAuthToken(context, "")
+        }
 
         prefs(context).edit()
             .putString(KEY_USERNAME, finalUser)
@@ -128,6 +155,9 @@ object AppConfig {
             .putString(KEY_MDNS_HOSTNAME, finalMdns)
             .putString(KEY_GITHUB_REPO, finalRepo)
             .putString(KEY_ADMIN_PIN, finalPin)
+            .putBoolean(KEY_AUTO_CHECKIN_PAGE, finalAutoCheckIn)
+            .putBoolean(KEY_HARDWARE_RFID_ENABLED, finalHwRfid)
+            .putBoolean(KEY_ALLOW_LOCALHOST_BYPASS, finalLocalhostBypass)
             .apply()
 
         return load(context)
