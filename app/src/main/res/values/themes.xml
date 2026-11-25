@@ -1,9 +1,4 @@
 <resources>
-    <style name="Theme.CardReader" parent="@android:style/Theme.Material.NoActionBar">
-        <item name="android:windowBackground">@color/bg_screen</item>
-        <item name="android:colorPrimary">@color/accent_blue</item>
-        <item name="android:colorAccent">@color/accent_blue</item>
-        <item name="android:textColorPrimary">@color/text_primary</item>
-        <item name="android:textColorSecondary">@color/text_secondary</item>
-    </style>
+
+    <style name="Theme.CardReader" parent="@style/Theme.Leanback" />
 </resources>

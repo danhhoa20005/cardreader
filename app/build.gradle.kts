@@ -4,8 +4,43 @@ plugins {
     alias(libs.plugins.android.application)
 }
 
-val releaseVersionName = providers.gradleProperty("versionName").orNull ?: "1.0.0"
-val releaseVersionCode = providers.gradleProperty("versionCode").orNull?.toIntOrNull() ?: 10000
+val versionPropsFile = rootProject.file("version.properties")
+val versionProps = Properties().apply {
+    if (versionPropsFile.exists()) {
+        versionPropsFile.inputStream().use { load(it) }
+    }
+}
+val verMajor = versionProps.getProperty("VERSION_MAJOR")?.toIntOrNull() ?: 1
+val verMinor = versionProps.getProperty("VERSION_MINOR")?.toIntOrNull() ?: 0
+val verPatch = versionProps.getProperty("VERSION_PATCH")?.toIntOrNull() ?: 4
+val defaultVerName = "$verMajor.$verMinor.$verPatch"
+val defaultVerCode = versionProps.getProperty("VERSION_CODE")?.toIntOrNull()
+    ?: (verMajor * 10000 + verMinor * 100 + verPatch)
+
+val releaseVersionName = providers.gradleProperty("versionName").orNull ?: defaultVerName
+val releaseVersionCode = providers.gradleProperty("versionCode").orNull?.toIntOrNull() ?: defaultVerCode
+
+tasks.register("bumpVersion") {
+    group = "release"
+    description = "Tự động tăng VERSION_PATCH và VERSION_CODE cho mỗi bản xuất APK mới."
+    val propsFile = versionPropsFile
+    doLast {
+        val p = Properties().apply {
+            if (propsFile.exists()) propsFile.inputStream().use { load(it) }
+        }
+        val major = p.getProperty("VERSION_MAJOR")?.toIntOrNull() ?: 1
+        val minor = p.getProperty("VERSION_MINOR")?.toIntOrNull() ?: 0
+        val nextPatch = (p.getProperty("VERSION_PATCH")?.toIntOrNull() ?: 0) + 1
+        val nextCode = (p.getProperty("VERSION_CODE")?.toIntOrNull() ?: (major * 10000 + minor * 100)) + 1
+        propsFile.writeText(
+            "VERSION_MAJOR=$major\n" +
+                "VERSION_MINOR=$minor\n" +
+                "VERSION_PATCH=$nextPatch\n" +
+                "VERSION_CODE=$nextCode\n"
+        )
+        println("Bumped version to $major.$minor.$nextPatch (versionCode=$nextCode)")
+    }
+}
 
 android {
     namespace = "com.example.cardreader"
@@ -15,15 +50,16 @@ android {
 
     defaultConfig {
         applicationId = "com.example.cardreader"
-        minSdk = 30
-        targetSdk = 37
+        minSdk = 23
+        targetSdk = 35
         versionCode = releaseVersionCode
         versionName = releaseVersionName
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         buildConfigField("String", "DEFAULT_TARGET_URL", "\"http://diemdanhhs.com\"")
         buildConfigField("String", "DEFAULT_MDNS_HOSTNAME", "\"diemdanh.local\"")
-        buildConfigField("int", "CONTROL_SERVER_PORT", "8080")
         buildConfigField("String", "DEFAULT_GITHUB_REPO", "\"danhhoa20005/cardreader\"")
+        buildConfigField("int", "CONTROL_SERVER_PORT", "8888")
     }
 
     buildFeatures {
@@ -32,6 +68,9 @@ android {
 
     signingConfigs {
         create("release") {
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
             val propsFile = rootProject.file("keystore.properties")
             if (propsFile.exists()) {
                 val props = Properties().apply {
@@ -60,10 +99,8 @@ android {
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
             }
-            optimization {
-                enable = true
-                packageScope = setOf("androidx.**", "kotlin.**", "kotlinx.**")
-            }
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
     }
 
@@ -75,7 +112,11 @@ android {
 
 dependencies {
     implementation(libs.androidx.core.ktx)
-    implementation(libs.androidx.activity.ktx)
+    implementation(libs.androidx.leanback)
+    implementation(libs.glide)
     testImplementation(libs.junit)
     testImplementation(libs.json)
+    androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation(libs.androidx.test.core)
+    androidTestImplementation(libs.androidx.test.runner)
 }

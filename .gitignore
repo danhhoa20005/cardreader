@@ -20,4 +20,5 @@ keystore.properties
 *.keystore
 *.7z
 .artifacts/
+/apk_release/
 js_bundle.txt

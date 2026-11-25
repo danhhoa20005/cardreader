@@ -26,13 +26,13 @@ sealed class UpdateCheckResult {
 }
 
 /**
- * Checks GitHub Releases API for newer APK builds, downloads the APK into app-private storage,
- * and creates a FileProvider installation Intent without requiring root access.
+ * Kiểm tra bản phát hành mới trên GitHub Releases, tải tệp APK về bộ nhớ riêng của ứng dụng
+ * và khởi tạo Intent cài đặt qua FileProvider.
  */
 object GitHubUpdater {
 
-    private const val CONNECT_TIMEOUT_MS = 8000
-    private const val READ_TIMEOUT_MS = 12000
+    private const val CONNECT_TIMEOUT_MS = 8_000
+    private const val READ_TIMEOUT_MS = 12_000
 
     fun checkLatestRelease(repo: String, currentVersion: String): UpdateCheckResult {
         val cleanRepo = AppConfig.normalizeGithubRepo(repo)
@@ -57,12 +57,12 @@ object GitHubUpdater {
 
             when (code) {
                 200 -> parseLatestReleaseJson(body, currentVersion)
-                404 -> UpdateCheckResult.Error("Không tìm thấy repo hoặc chưa có Release công khai ($cleanRepo).")
-                403 -> UpdateCheckResult.Error("GitHub API tạm giới hạn lượt truy cập. Thử lại sau.")
+                404 -> UpdateCheckResult.Error("Chưa có bản Release công khai trên GitHub ($cleanRepo).")
+                403 -> UpdateCheckResult.Error("GitHub API tạm giới hạn lượt truy cập. Thử lại sau ít phút.")
                 else -> UpdateCheckResult.Error("Lỗi GitHub API (HTTP $code).")
             }
         } catch (e: Exception) {
-            UpdateCheckResult.Error("Không kiểm tra được cập nhật: ${e.message ?: "Lỗi mạng"}")
+            UpdateCheckResult.Error("Không kiểm tra được cập nhật: ${e.message ?: "Lỗi kết nối mạng"}")
         } finally {
             conn?.disconnect()
         }
@@ -94,7 +94,7 @@ object GitHubUpdater {
                     selectedName = name
                     selectedSize = asset.optLong("size", 0L)
                     if (name.contains("release", ignoreCase = true) ||
-                        name.contains("universal", ignoreCase = true)
+                        name.contains("LAN", ignoreCase = true)
                     ) {
                         break
                     }
@@ -107,7 +107,7 @@ object GitHubUpdater {
         }
 
         if (selectedUrl.isBlank()) {
-            return UpdateCheckResult.Error("Phiên bản mới ($tagName) chưa đính kèm file .apk.")
+            return UpdateCheckResult.Error("Bản phát hành mới ($tagName) chưa có tệp .apk đính kèm.")
         }
 
         val notes = json.optString("body", "").trim()
@@ -137,10 +137,11 @@ object GitHubUpdater {
             conn = openWithRedirects(release.apkUrl)
             val code = conn.responseCode
             if (code !in 200..299) {
-                throw IllegalStateException("Tải APK thất bại (HTTP $code)")
+                throw IllegalStateException("Tải tệp APK thất bại (HTTP $code)")
             }
 
-            val totalBytes = conn.contentLengthLong.takeIf { it > 0L } ?: release.fileSizeBytes
+            val headerLen = conn.getHeaderField("Content-Length")?.toLongOrNull() ?: -1L
+            val totalBytes = headerLen.takeIf { it > 0L } ?: release.fileSizeBytes
             val buffer = ByteArray(16 * 1024)
             var downloaded = 0L
             var lastPercent = -1
@@ -194,7 +195,7 @@ object GitHubUpdater {
             val conn = (URL(currentUrl).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = CONNECT_TIMEOUT_MS
-                readTimeout = 30000
+                readTimeout = 30_000
                 instanceFollowRedirects = false
                 setRequestProperty("User-Agent", "CardReader-Android")
             }
@@ -209,7 +210,7 @@ object GitHubUpdater {
             ) {
                 val next = conn.getHeaderField("Location")
                 conn.disconnect()
-                if (next.isNullOrBlank()) throw IllegalStateException("Redirect URL trống.")
+                if (next.isNullOrBlank()) throw IllegalStateException("URL chuyển hướng trống.")
                 currentUrl = URL(URL(currentUrl), next).toString()
             } else {
                 return conn

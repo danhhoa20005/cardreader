@@ -9,8 +9,7 @@ data class AppSettings(
     val targetUrl: String,
     val mdnsHostname: String,
     val githubRepo: String,
-    val adminPin: String,
-    val overlayPrompted: Boolean
+    val adminPin: String
 ) {
     fun hasCredentials(): Boolean = username.isNotEmpty() && password.isNotEmpty()
     fun hasAdminPin(): Boolean = adminPin.isNotEmpty()
@@ -25,9 +24,12 @@ object AppConfig {
     private const val KEY_GITHUB_REPO = "github_repo"
     private const val KEY_ADMIN_PIN = "admin_pin"
     private const val KEY_OVERLAY_PROMPTED = "overlay_prompted"
+    private const val KEY_LAST_WEB_USER = "last_web_user"
 
-    private val GITHUB_REPO_REGEX = Regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-    private val HOSTNAME_REGEX = Regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
+    private val HOSTNAME_REGEX =
+        Regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
+    private val GITHUB_REPO_REGEX =
+        Regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
     private fun prefs(context: Context): SharedPreferences =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -44,10 +46,49 @@ object AppConfig {
             targetUrl = normalizeUrl(targetRaw ?: BuildConfig.DEFAULT_TARGET_URL)
                 .ifEmpty { BuildConfig.DEFAULT_TARGET_URL },
             mdnsHostname = normalizeMdnsHostname(mdnsRaw ?: BuildConfig.DEFAULT_MDNS_HOSTNAME),
-            githubRepo = (repoRaw ?: BuildConfig.DEFAULT_GITHUB_REPO).trim(),
-            adminPin = (p.getString(KEY_ADMIN_PIN, "") ?: "").trim(),
-            overlayPrompted = p.getBoolean(KEY_OVERLAY_PROMPTED, false)
+            githubRepo = normalizeGithubRepo(repoRaw ?: BuildConfig.DEFAULT_GITHUB_REPO)
+                .ifEmpty { BuildConfig.DEFAULT_GITHUB_REPO },
+            adminPin = (p.getString(KEY_ADMIN_PIN, "") ?: "").trim()
         )
+    }
+
+    fun saveCredentials(
+        context: Context,
+        username: String,
+        password: String,
+        targetUrl: String? = null
+    ): AppSettings {
+        val editor = prefs(context).edit()
+            .putString(KEY_USERNAME, username.trim())
+            .putString(KEY_PASSWORD, password.trim())
+        if (!targetUrl.isNullOrBlank()) {
+            val normalized = normalizeUrl(targetUrl)
+            if (normalized.isNotEmpty()) {
+                editor.putString(KEY_TARGET_URL, normalized)
+            }
+        }
+        editor.apply()
+        return load(context)
+    }
+
+    fun saveTargetUrl(context: Context, targetUrl: String): AppSettings {
+        val finalTarget = normalizeUrl(targetUrl).ifEmpty { BuildConfig.DEFAULT_TARGET_URL }
+        prefs(context).edit().putString(KEY_TARGET_URL, finalTarget).apply()
+        return load(context)
+    }
+
+    fun getLastWebUser(context: Context): String =
+        (prefs(context).getString(KEY_LAST_WEB_USER, "") ?: "").trim()
+
+    fun setLastWebUser(context: Context, username: String) {
+        prefs(context).edit().putString(KEY_LAST_WEB_USER, username.trim()).apply()
+    }
+
+    fun isOverlayPrompted(context: Context): Boolean =
+        prefs(context).getBoolean(KEY_OVERLAY_PROMPTED, false)
+
+    fun markOverlayPrompted(context: Context) {
+        prefs(context).edit().putBoolean(KEY_OVERLAY_PROMPTED, true).apply()
     }
 
     fun saveSettings(
@@ -56,7 +97,7 @@ object AppConfig {
         password: String?,
         targetUrl: String,
         mdnsHostname: String,
-        githubRepo: String,
+        githubRepo: String? = null,
         adminPin: String? = null,
         clearAdminPin: Boolean = false
     ): AppSettings {
@@ -69,7 +110,11 @@ object AppConfig {
         }
         val finalTarget = normalizeUrl(targetUrl).ifEmpty { BuildConfig.DEFAULT_TARGET_URL }
         val finalMdns = normalizeMdnsHostname(mdnsHostname)
-        val finalRepo = normalizeGithubRepo(githubRepo)
+        val finalRepo = if (githubRepo != null) {
+            normalizeGithubRepo(githubRepo).ifEmpty { current.githubRepo }
+        } else {
+            current.githubRepo
+        }
         val finalPin = when {
             clearAdminPin -> ""
             adminPin == null -> current.adminPin
@@ -86,18 +131,6 @@ object AppConfig {
             .apply()
 
         return load(context)
-    }
-
-    fun saveGithubRepo(context: Context, repo: String) {
-        prefs(context).edit()
-            .putString(KEY_GITHUB_REPO, normalizeGithubRepo(repo))
-            .apply()
-    }
-
-    fun markOverlayPrompted(context: Context) {
-        prefs(context).edit()
-            .putBoolean(KEY_OVERLAY_PROMPTED, true)
-            .apply()
     }
 
     fun normalizeUrl(raw: String): String {
@@ -126,16 +159,20 @@ object AppConfig {
     }
 
     fun normalizeGithubRepo(raw: String): String {
-        var cleaned = raw.trim()
-        if (cleaned.startsWith("https://github.com/", ignoreCase = true)) {
-            cleaned = cleaned.substringAfter("github.com/", "")
-        } else if (cleaned.startsWith("http://github.com/", ignoreCase = true)) {
-            cleaned = cleaned.substringAfter("github.com/", "")
+        var s = raw.trim()
+        s = s.removePrefix("https://github.com/")
+            .removePrefix("http://github.com/")
+            .removePrefix("github.com/")
+            .removeSuffix(".git")
+            .trim('/')
+        val parts = s.split('/').filter { it.isNotBlank() }
+        if (parts.size >= 2) {
+            val candidate = "${parts[0]}/${parts[1]}"
+            if (GITHUB_REPO_REGEX.matches(candidate)) return candidate
         }
-        cleaned = cleaned.trim('/').removeSuffix(".git")
-        val parts = cleaned.split('/').filter { it.isNotBlank() }
-        return if (parts.size >= 2) "${parts[0]}/${parts[1]}" else cleaned
+        return ""
     }
 
-    fun isValidGithubRepo(repo: String): Boolean = GITHUB_REPO_REGEX.matches(repo.trim())
+    fun isValidGithubRepo(repo: String): Boolean =
+        GITHUB_REPO_REGEX.matches(repo.trim())
 }

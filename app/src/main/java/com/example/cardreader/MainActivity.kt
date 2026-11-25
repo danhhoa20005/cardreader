@@ -2,6 +2,7 @@ package com.example.cardreader
 
 import android.app.AlertDialog
 import android.content.Intent
+import android.content.res.Configuration
 import android.net.Uri
 import android.os.Bundle
 import android.os.CountDownTimer
@@ -11,290 +12,237 @@ import android.text.InputType
 import android.text.TextWatcher
 import android.view.View
 import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageButton
-import android.widget.ImageView
-import android.widget.LinearLayout
-import android.widget.ProgressBar
 import android.widget.TextView
-import androidx.activity.ComponentActivity
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.content.ContextCompat
-import java.io.File
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.fragment.app.FragmentActivity
+import java.net.URI
 
-class MainActivity : ComponentActivity(), RemoteScreenListener {
+/**
+ * Màn hình cấu hình (Screen 1) đạt chuẩn UI/UX Pro Max:
+ * - Tương thích Dọc (Portrait), Ngang 2 cột (Landscape) trên điện thoại và Màn hình lớn / D-Pad trên TV Box.
+ * - Hỗ trợ chọn nhanh hệ thống (diemdanhhs.com / dontrahs.com), điều khiển LAN cổng 8888 và cập nhật OTA qua GitHub.
+ */
+class MainActivity : FragmentActivity(), RemoteScreenListener {
 
-    private lateinit var tvVersionBadge: TextView
-    private lateinit var ivNetworkIcon: ImageView
-    private lateinit var tvNetworkBadge: TextView
-    private lateinit var tvLanLocalUrl: TextView
-    private lateinit var tvLanIpUrl: TextView
-    private lateinit var layoutWarning: LinearLayout
+    private lateinit var tvTitle: TextView
+    private lateinit var tvVersionSubtitle: TextView
+    private lateinit var tvLanInfo: TextView
+    private lateinit var btnDomainDiemDanh: Button
+    private lateinit var btnDomainDonTra: Button
+    private lateinit var layoutWarning: View
     private lateinit var tvWarning: TextView
-    private lateinit var layoutCountdown: LinearLayout
+    private lateinit var layoutCountdown: View
     private lateinit var tvCountdown: TextView
-    private lateinit var progressCountdown: ProgressBar
-    private lateinit var btnPauseCountdown: Button
+    private lateinit var btnToggleCountdown: Button
     private lateinit var etUsername: EditText
     private lateinit var etPassword: EditText
     private lateinit var btnTogglePassword: ImageButton
     private lateinit var btnSaveAndConnect: Button
-    private lateinit var btnCheckUpdate: Button
-    private lateinit var btnToggleAdvanced: Button
-    private lateinit var tvUpdateStatus: TextView
-    private lateinit var layoutAdvancedSettings: LinearLayout
-    private lateinit var etTargetUrl: EditText
-    private lateinit var etMdnsHostname: EditText
-    private lateinit var etAdminPin: EditText
-    private lateinit var etGithubRepo: EditText
+    private lateinit var btnGithubUpdate: Button
 
     private var countDownTimer: CountDownTimer? = null
     private var isUserInteracting = false
     private var isPasswordVisible = false
     private var suppressWatchers = false
     private var isNetworkConnected = false
-    private var isUpdateFlowActive = false
-    private var isOverlayDialogShowing = false
-    private var waitingOverlaySettingsReturn = false
     private var networkMonitor: NetworkMonitor? = null
 
-    private var pendingInstallApk: File? = null
-    private var downloadDialog: AlertDialog? = null
-
-    private val installPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-            val apk = pendingInstallApk
-            if (apk != null && apk.exists() && packageManager.canRequestPackageInstalls()) {
-                pendingInstallApk = null
-                launchApkInstaller(apk)
-            } else if (apk != null) {
-                isUpdateFlowActive = false
-                tvUpdateStatus.text = "Chưa bật quyền cài đặt APK. Hãy kiểm tra lại khi bật quyền xong."
-            }
-        }
+    companion object {
+        const val EXTRA_PAUSE_AUTO_CONNECT = "pause_auto_connect"
+        private const val STATE_USER_INTERACTING = "state_user_interacting"
+        private const val STATE_PASSWORD_VISIBLE = "state_password_visible"
+        private const val URL_DIEM_DANH = "http://diemdanhhs.com"
+        private const val URL_DON_TRA = "https://dontrahs.com"
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         RemoteControlHub.init(this)
+
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
         setContentView(R.layout.activity_main)
+        applyEdgeToEdgeInsets()
 
-        bindViews()
-
-        val settings = AppConfig.load(this)
-        tvVersionBadge.text = "v${BuildConfig.VERSION_NAME}"
-        populateFields(settings)
-        updateSummaryText(settings)
-
-        if (settings.hasCredentials()) {
-            btnSaveAndConnect.requestFocus()
-        } else {
-            etUsername.requestFocus()
-        }
-
-        val loginError = intent.getStringExtra("login_error")
-        val pauseAutoConnect = intent.getBooleanExtra(EXTRA_PAUSE_AUTO_CONNECT, false)
-        if (pauseAutoConnect) {
-            isUserInteracting = true
-        }
-
-        if (!loginError.isNullOrEmpty()) {
-            RemoteControlHub.lastError = loginError
-        }
-
-        networkMonitor = NetworkMonitor(this, allowLanWithoutInternet = true) { connected ->
-            isNetworkConnected = connected
-            updateNetworkBadge(connected)
-            if (connected) {
-                if (tvWarning.text.toString().contains("Mất kết nối mạng")) {
-                    layoutWarning.visibility = View.GONE
-                }
-                val currentSettings = AppConfig.load(this)
-                if (currentSettings.hasCredentials() && !isUserInteracting && !isUpdateFlowActive && !isFinishing) {
-                    layoutCountdown.visibility = View.VISIBLE
-                    startCountdown(currentSettings)
-                }
-            } else {
-                showWarning("Mất kết nối mạng (Wi-Fi/LAN). Vui lòng kiểm tra dây mạng hoặc Wi-Fi.")
-                countDownTimer?.cancel()
-                RemoteControlHub.countdownSeconds = -1
-                if (AppConfig.load(this).hasCredentials()) {
-                    layoutCountdown.visibility = View.VISIBLE
-                    progressCountdown.progress = 0
-                    tvCountdown.text = "Đã tạm dừng đếm ngược (Mất kết nối mạng)"
-                }
-            }
-        }
-        isNetworkConnected = networkMonitor?.isCurrentlyConnected() ?: false
-        updateNetworkBadge(isNetworkConnected)
-        networkMonitor?.register()
-
-        configureInitialState(settings, loginError, pauseAutoConnect)
-        attachInteractionWatchers()
-        setupListeners()
-
-        RemoteControlHub.attachListener(RemoteScreen.MAIN, this)
-
-        val pendingApkPath = intent.getStringExtra(EXTRA_PENDING_APK_PATH)
-        if (!pendingApkPath.isNullOrBlank()) {
-            val apk = File(pendingApkPath)
-            if (apk.exists()) {
-                isUpdateFlowActive = true
-                countDownTimer?.cancel()
-                installDownloadedApk(apk)
-                return
-            }
-        }
-
-        maybePromptOverlayPermission(settings)
-        maybeAutoCheckUpdateOnLaunch(settings)
-    }
-
-    private fun bindViews() {
-        tvVersionBadge = findViewById(R.id.tvVersionBadge)
-        ivNetworkIcon = findViewById(R.id.ivNetworkIcon)
-        tvNetworkBadge = findViewById(R.id.tvNetworkBadge)
-        tvLanLocalUrl = findViewById(R.id.tvLanLocalUrl)
-        tvLanIpUrl = findViewById(R.id.tvLanIpUrl)
+        tvTitle = findViewById(R.id.tvTitle)
+        tvVersionSubtitle = findViewById(R.id.tvVersionSubtitle)
+        tvLanInfo = findViewById(R.id.tvLanInfo)
+        btnDomainDiemDanh = findViewById(R.id.btnDomainDiemDanh)
+        btnDomainDonTra = findViewById(R.id.btnDomainDonTra)
         layoutWarning = findViewById(R.id.layoutWarning)
         tvWarning = findViewById(R.id.tvWarning)
         layoutCountdown = findViewById(R.id.layoutCountdown)
         tvCountdown = findViewById(R.id.tvCountdown)
-        progressCountdown = findViewById(R.id.progressCountdown)
-        btnPauseCountdown = findViewById(R.id.btnPauseCountdown)
+        btnToggleCountdown = findViewById(R.id.btnToggleCountdown)
         etUsername = findViewById(R.id.etUsername)
         etPassword = findViewById(R.id.etPassword)
         btnTogglePassword = findViewById(R.id.btnTogglePassword)
         btnSaveAndConnect = findViewById(R.id.btnSaveAndConnect)
-        btnCheckUpdate = findViewById(R.id.btnCheckUpdate)
-        btnToggleAdvanced = findViewById(R.id.btnToggleAdvanced)
-        tvUpdateStatus = findViewById(R.id.tvUpdateStatus)
-        layoutAdvancedSettings = findViewById(R.id.layoutAdvancedSettings)
-        etTargetUrl = findViewById(R.id.etTargetUrl)
-        etMdnsHostname = findViewById(R.id.etMdnsHostname)
-        etAdminPin = findViewById(R.id.etAdminPin)
-        etGithubRepo = findViewById(R.id.etGithubRepo)
-    }
+        btnGithubUpdate = findViewById(R.id.btnGithubUpdate)
 
-    private fun updateNetworkBadge(connected: Boolean) {
-        if (connected) {
-            ivNetworkIcon.setImageResource(R.drawable.ic_wifi)
-            ivNetworkIcon.setColorFilter(ContextCompat.getColor(this, R.color.status_ok_text))
-            tvNetworkBadge.setTextColor(ContextCompat.getColor(this, R.color.status_ok_text))
-            tvNetworkBadge.text = "Điều khiển từ xa qua LAN (Online)"
-        } else {
-            ivNetworkIcon.setImageResource(R.drawable.ic_wifi_off)
-            ivNetworkIcon.setColorFilter(ContextCompat.getColor(this, R.color.status_error_text))
-            tvNetworkBadge.setTextColor(ContextCompat.getColor(this, R.color.status_error_text))
-            tvNetworkBadge.text = "Chưa có kết nối Wi-Fi / LAN"
+        val pauseAutoConnect = intent.getBooleanExtra(EXTRA_PAUSE_AUTO_CONNECT, false) ||
+            (savedInstanceState?.getBoolean(STATE_USER_INTERACTING, false) == true)
+        setPausedFlag(pauseAutoConnect)
+
+        if (!Settings.canDrawOverlays(this) && !pauseAutoConnect && !AppConfig.isOverlayPrompted(this)) {
+            AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                .setTitle("Quyền tự mở khi khởi động TV Box")
+                .setMessage("Nếu cài trên Android TV Box cần tự chạy khi bật nguồn, hãy cấp quyền 'Hiển thị trên ứng dụng khác'. Trên điện thoại có thể bấm 'Bỏ qua'.")
+                .setPositiveButton("Mở Cài đặt") { _, _ ->
+                    AppConfig.markOverlayPrompted(this)
+                    runCatching {
+                        startActivity(
+                            Intent(
+                                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                Uri.parse("package:$packageName")
+                            )
+                        )
+                    }
+                }
+                .setNegativeButton("Bỏ qua") { _, _ ->
+                    AppConfig.markOverlayPrompted(this)
+                }
+                .setOnCancelListener {
+                    AppConfig.markOverlayPrompted(this)
+                }
+                .show()
         }
-    }
 
-    private fun showWarning(message: String) {
-        tvWarning.text = message
-        layoutWarning.visibility = View.VISIBLE
-    }
+        networkMonitor = NetworkMonitor(this, allowLanWithoutInternet = true) { connected ->
+            isNetworkConnected = connected
+            updateConnectButtonState(connected)
+            if (connected) {
+                if (tvWarning.text.toString().contains("Mất kết nối mạng")) {
+                    hideWarning()
+                }
+                val current = AppConfig.load(this)
+                if (current.hasCredentials() && !isUserInteracting && !isFinishing) {
+                    startCountdown()
+                }
+            } else {
+                showWarning("Mất kết nối mạng. Vui lòng kiểm tra dây LAN hoặc Wi-Fi.")
+                countDownTimer?.cancel()
+                countDownTimer = null
+                RemoteControlHub.countdownSeconds = -1
+                if (AppConfig.load(this).hasCredentials()) {
+                    layoutCountdown.visibility = View.VISIBLE
+                    tvCountdown.text = "Đã tạm dừng đếm ngược do mất kết nối mạng..."
+                    updateCountdownToggleUi()
+                }
+            }
+        }
+        isNetworkConnected = networkMonitor?.isCurrentlyConnected() ?: false
+        updateConnectButtonState(isNetworkConnected)
+        if (isNetworkConnected) {
+            btnSaveAndConnect.requestFocus()
+        } else {
+            etUsername.requestFocus()
+        }
+        networkMonitor?.register()
 
-    private fun populateFields(settings: AppSettings) {
-        suppressWatchers = true
-        etUsername.setText(settings.username)
-        etPassword.setText(settings.password)
-        etTargetUrl.setText(settings.targetUrl)
-        etMdnsHostname.setText(settings.mdnsHostname)
-        etAdminPin.setText(settings.adminPin)
-        etGithubRepo.setText(settings.githubRepo)
-        suppressWatchers = false
-    }
+        val loginError = intent.getStringExtra("login_error")
+        if (!loginError.isNullOrEmpty()) {
+            RemoteControlHub.lastError = loginError
+        }
 
-    private fun updateSummaryText(settings: AppSettings) {
-        tvUpdateStatus.text = "Trang điểm danh: ${settings.targetUrl}"
-    }
+        val settings = AppConfig.load(this)
+        if (savedInstanceState == null) {
+            populateFields(settings)
+        } else if (savedInstanceState.getBoolean(STATE_PASSWORD_VISIBLE, false)) {
+            applyPasswordVisibility(true)
+        }
+        updateDomainButtonsState(settings.targetUrl)
+        updateLanBanner()
 
-    private fun configureInitialState(
-        settings: AppSettings,
-        loginError: String?,
-        pauseAutoConnect: Boolean
-    ) {
         if (settings.hasCredentials()) {
             layoutCountdown.visibility = View.VISIBLE
+            updateCountdownToggleUi()
 
-            when {
-                !loginError.isNullOrEmpty() -> showWarning(loginError)
-                !isNetworkConnected -> showWarning("Mất kết nối mạng (Wi-Fi/LAN). Vui lòng kiểm tra kết nối.")
-                else -> layoutWarning.visibility = View.GONE
+            if (!loginError.isNullOrEmpty()) {
+                showWarning(loginError)
+            } else if (!isNetworkConnected) {
+                showWarning("Mất kết nối mạng. Vui lòng kiểm tra dây LAN hoặc Wi-Fi.")
+            } else {
+                hideWarning()
             }
 
-            if (pauseAutoConnect) {
-                RemoteControlHub.countdownSeconds = -1
-                progressCountdown.progress = 0
-                tvCountdown.text = "Đang tạm dừng theo lệnh từ LAN."
-                btnPauseCountdown.text = "Tiếp tục"
-            } else if (isNetworkConnected) {
-                startCountdown(settings)
-            } else {
-                RemoteControlHub.countdownSeconds = -1
-                progressCountdown.progress = 0
-                tvCountdown.text = "Đang chờ kết nối mạng để đếm ngược..."
+            when {
+                pauseAutoConnect -> {
+                    RemoteControlHub.countdownSeconds = -1
+                    tvCountdown.text = "Đã tạm dừng tự động kết nối. Bấm 'Tiếp tục' hoặc 'Lưu và Kết Nối'."
+                }
+                isNetworkConnected -> startCountdown()
+                else -> {
+                    RemoteControlHub.countdownSeconds = -1
+                    tvCountdown.text = "Đang chờ kết nối mạng để tự động đếm ngược..."
+                }
             }
         } else {
             RemoteControlHub.countdownSeconds = -1
-            val msg = when {
-                !loginError.isNullOrEmpty() -> loginError
-                !isNetworkConnected -> "Mất kết nối mạng (Wi-Fi/LAN). Vui lòng kiểm tra kết nối."
-                else -> "Chưa có tài khoản điểm danh. Nhập tại đây hoặc qua web http://${settings.mdnsHostname}:${BuildConfig.CONTROL_SERVER_PORT}"
-            }
-            showWarning(msg)
             layoutCountdown.visibility = View.GONE
+            when {
+                !loginError.isNullOrEmpty() -> showWarning(loginError)
+                !isNetworkConnected -> showWarning("Mất kết nối mạng. Vui lòng kiểm tra dây LAN hoặc Wi-Fi.")
+                else -> showWarning(
+                    "Chưa có thông tin đăng nhập. Nhập tại đây hoặc qua LAN http://${settings.mdnsHostname}:${BuildConfig.CONTROL_SERVER_PORT}"
+                )
+            }
         }
-    }
 
-    private fun attachInteractionWatchers() {
-        val watcher = object : TextWatcher {
+        val textWatcher = object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                if (!suppressWatchers) {
-                    stopCountdownByUser("Đã dừng đếm ngược. Nhấn 'Lưu và Kết Nối' khi chỉnh sửa xong.")
+                if (!suppressWatchers && !isUserInteracting) {
+                    pauseCountdown("Đã dừng đếm ngược. Nhấn 'Lưu và Kết Nối' khi hoàn tất chỉnh sửa.")
                 }
             }
             override fun afterTextChanged(s: Editable?) {}
         }
-        etUsername.addTextChangedListener(watcher)
-        etPassword.addTextChangedListener(watcher)
-        etTargetUrl.addTextChangedListener(watcher)
-        etMdnsHostname.addTextChangedListener(watcher)
-        etAdminPin.addTextChangedListener(watcher)
-        etGithubRepo.addTextChangedListener(watcher)
-    }
+        etUsername.addTextChangedListener(textWatcher)
+        etPassword.addTextChangedListener(textWatcher)
 
-    private fun setupListeners() {
-        btnTogglePassword.setOnClickListener {
-            isPasswordVisible = !isPasswordVisible
-            val selection = etPassword.selectionEnd.coerceAtLeast(0)
-            etPassword.inputType = if (isPasswordVisible) {
-                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+        etPassword.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_DONE && btnSaveAndConnect.isEnabled) {
+                btnSaveAndConnect.performClick()
+                true
             } else {
-                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                false
             }
-            etPassword.setSelection(selection.coerceAtMost(etPassword.text?.length ?: 0))
-            btnTogglePassword.setImageResource(
-                if (isPasswordVisible) R.drawable.ic_eye_off else R.drawable.ic_eye
-            )
-            btnTogglePassword.contentDescription =
-                if (isPasswordVisible) "Ẩn mật khẩu" else "Hiện mật khẩu"
         }
 
-        btnPauseCountdown.setOnClickListener {
-            val current = AppConfig.load(this)
+        btnDomainDiemDanh.setOnClickListener {
+            selectSystemDomain(URL_DIEM_DANH)
+        }
+        btnDomainDonTra.setOnClickListener {
+            selectSystemDomain(URL_DON_TRA)
+        }
+
+        btnTogglePassword.setOnClickListener {
+            applyPasswordVisibility(!isPasswordVisible)
+        }
+
+        btnToggleCountdown.setOnClickListener {
             if (isUserInteracting) {
-                isUserInteracting = false
-                if (current.hasCredentials() && isNetworkConnected && !isUpdateFlowActive) {
-                    btnPauseCountdown.text = "Tạm dừng"
-                    startCountdown(current)
-                }
+                resumeCountdown()
             } else {
-                stopCountdownByUser("Đã tạm dừng đếm ngược.")
+                pauseCountdown("Đã tạm dừng đếm ngược. Bấm 'Tiếp tục' hoặc 'Lưu và Kết Nối'.")
             }
+        }
+
+        btnGithubUpdate.setOnClickListener {
+            pauseCountdown("Đang kiểm tra bản cập nhật mới trên GitHub...")
+            RemoteControlHub.checkGitHubUpdateAsync(autoInstallIfAvailable = true)
         }
 
         btnSaveAndConnect.setOnClickListener {
@@ -302,364 +250,280 @@ class MainActivity : ComponentActivity(), RemoteScreenListener {
             val pass = etPassword.text.toString().trim()
 
             if (user.isEmpty() || pass.isEmpty()) {
-                if (user.isEmpty()) {
-                    etUsername.error = "Vui lòng nhập tên đăng nhập"
-                    etUsername.requestFocus()
-                } else {
-                    etPassword.error = "Vui lòng nhập mật khẩu"
-                    etPassword.requestFocus()
-                }
+                if (user.isEmpty()) etUsername.error = "Vui lòng nhập tên đăng nhập"
+                if (pass.isEmpty()) etPassword.error = "Vui lòng nhập mật khẩu"
                 return@setOnClickListener
             }
 
-            val prev = AppConfig.load(this)
-            val newPin = etAdminPin.text.toString().trim()
-            val updated = AppConfig.saveSettings(
-                context = this,
-                username = user,
-                password = pass,
-                targetUrl = etTargetUrl.text.toString(),
-                mdnsHostname = etMdnsHostname.text.toString(),
-                githubRepo = etGithubRepo.text.toString(),
-                adminPin = newPin,
-                clearAdminPin = newPin.isEmpty()
-            )
-            if (prev.mdnsHostname != updated.mdnsHostname) {
-                RemoteControlHub.updateMdnsHostname(updated.mdnsHostname)
-            }
-            RemoteControlHub.clearWebSessionsIfNeeded(prev.adminPin, updated.adminPin)
-
+            val updated = AppConfig.saveCredentials(this, user, pass)
             countDownTimer?.cancel()
+            countDownTimer = null
             RemoteControlHub.countdownSeconds = -1
+            setPausedFlag(false)
             navigateToWebView(updated)
         }
 
-        btnToggleAdvanced.setOnClickListener {
-            val show = layoutAdvancedSettings.visibility != View.VISIBLE
-            layoutAdvancedSettings.visibility = if (show) View.VISIBLE else View.GONE
-            btnToggleAdvanced.text = if (show) {
-                "Thu gọn Cấu hình"
-            } else {
-                "Cấu hình LAN & GitHub"
-            }
-            if (show) {
-                stopCountdownByUser("Đã dừng đếm ngược khi mở phần cấu hình.")
-            }
-        }
-
-        btnCheckUpdate.setOnClickListener {
-            val repoInput = AppConfig.normalizeGithubRepo(etGithubRepo.text.toString())
-            AppConfig.saveGithubRepo(this, repoInput)
-            suppressWatchers = true
-            etGithubRepo.setText(repoInput)
-            suppressWatchers = false
-
-            if (!AppConfig.isValidGithubRepo(repoInput)) {
-                layoutAdvancedSettings.visibility = View.VISIBLE
-                btnToggleAdvanced.text = "Thu gọn Cấu hình"
-                etGithubRepo.error = "Nhập đúng định dạng owner/repo"
-                etGithubRepo.requestFocus()
-                tvUpdateStatus.text = "Nhập GitHub repo (vd: username/cardreader) rồi bấm kiểm tra lại."
-                stopCountdownByUser("Đã dừng đếm ngược để cấu hình GitHub.")
-                return@setOnClickListener
-            }
-
-            if (!NetworkMonitor.hasInternetAccess(this)) {
-                tvUpdateStatus.text = "Cần kết nối Internet để kiểm tra cập nhật GitHub."
-                return@setOnClickListener
-            }
-
-            stopCountdownByUser("Đã dừng đếm ngược để kiểm tra cập nhật.")
-            btnCheckUpdate.isEnabled = false
-            tvUpdateStatus.text = "Đang kiểm tra bản mới trên GitHub ($repoInput)..."
-            RemoteControlHub.triggerUpdateCheck(isAutoCheck = false) {
-                btnCheckUpdate.isEnabled = true
-                handleHubUpdateResult(isAutoCheck = false)
-            }
-        }
+        RemoteControlHub.attachListener(RemoteScreen.MAIN, this)
     }
 
-    private fun stopCountdownByUser(message: String) {
-        isUserInteracting = true
-        countDownTimer?.cancel()
-        RemoteControlHub.countdownSeconds = -1
-        if (layoutCountdown.visibility == View.VISIBLE || AppConfig.load(this).hasCredentials()) {
-            layoutCountdown.visibility = View.VISIBLE
-            progressCountdown.progress = 0
-            tvCountdown.text = message
-            btnPauseCountdown.text = "Tiếp tục"
-        }
-    }
-
-    private fun startCountdown(settings: AppSettings) {
-        if (!isNetworkConnected || isUpdateFlowActive || isUserInteracting || isOverlayDialogShowing) return
-        countDownTimer?.cancel()
-        btnPauseCountdown.text = "Tạm dừng"
-        progressCountdown.max = 30
-        countDownTimer = object : CountDownTimer(30_000L, 1_000L) {
-            override fun onTick(millisUntilFinished: Long) {
-                val seconds = ((millisUntilFinished + 999L) / 1000L).toInt()
-                RemoteControlHub.countdownSeconds = seconds
-                progressCountdown.progress = seconds.coerceIn(0, 30)
-                tvCountdown.text = "Tự động kết nối sau ${seconds}s"
-            }
-
-            override fun onFinish() {
-                RemoteControlHub.countdownSeconds = -1
-                progressCountdown.progress = 0
-                if (!isFinishing && isNetworkConnected && !isUpdateFlowActive && !isUserInteracting) {
-                    navigateToWebView(AppConfig.load(this@MainActivity))
-                }
-            }
-        }.start()
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(STATE_USER_INTERACTING, isUserInteracting)
+        outState.putBoolean(STATE_PASSWORD_VISIBLE, isPasswordVisible)
     }
 
     override fun onResume() {
         super.onResume()
         RemoteControlHub.attachListener(RemoteScreen.MAIN, this)
-        if (waitingOverlaySettingsReturn) {
-            waitingOverlaySettingsReturn = false
-            val current = AppConfig.load(this)
-            if (current.hasCredentials() && isNetworkConnected && !isUserInteracting && !isUpdateFlowActive) {
-                layoutCountdown.visibility = View.VISIBLE
-                startCountdown(current)
-            }
+        updateDomainButtonsState(AppConfig.load(this).targetUrl)
+        updateLanBanner()
+    }
+
+    private fun selectSystemDomain(url: String) {
+        val updated = AppConfig.saveTargetUrl(this, url)
+        // Xóa user cũ để WebView làm mới sạch phiên khi chuyển hệ thống
+        AppConfig.setLastWebUser(this, "")
+        updateDomainButtonsState(updated.targetUrl)
+        updateLanBanner()
+        RemoteControlHub.addLog("Đã chọn máy chủ hệ thống: ${updated.targetUrl}")
+    }
+
+    private fun updateDomainButtonsState(targetUrl: String) {
+        val lower = targetUrl.lowercase()
+        val isDonTra = lower.contains("dontrahs.com")
+        val isDiemDanh = lower.contains("diemdanhhs.com")
+        btnDomainDiemDanh.isSelected = isDiemDanh
+        btnDomainDonTra.isSelected = isDonTra
+    }
+
+    private fun applyEdgeToEdgeInsets() {
+        val container = findViewById<View>(R.id.contentContainer) ?: return
+        val baseLeft = container.paddingLeft
+        val baseTop = container.paddingTop
+        val baseRight = container.paddingRight
+        val baseBottom = container.paddingBottom
+
+        ViewCompat.setOnApplyWindowInsetsListener(container) { view, windowInsets ->
+            val insets = windowInsets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or
+                    WindowInsetsCompat.Type.displayCutout() or
+                    WindowInsetsCompat.Type.ime()
+            )
+            view.setPadding(
+                baseLeft + insets.left,
+                baseTop + insets.top,
+                baseRight + insets.right,
+                baseBottom + insets.bottom
+            )
+            windowInsets
         }
+    }
+
+    internal fun updateConnectButtonState(connected: Boolean) {
+        btnSaveAndConnect.isEnabled = connected
+        btnSaveAndConnect.alpha = if (connected) 1.0f else 0.55f
+        btnSaveAndConnect.text = if (connected) "Lưu và Kết Nối" else "Đang chờ kết nối mạng..."
+    }
+
+    private fun applyPasswordVisibility(visible: Boolean) {
+        isPasswordVisible = visible
+        val selection = etPassword.selectionEnd.coerceAtLeast(0)
+        val savedTypeface = etPassword.typeface
+        suppressWatchers = true
+        etPassword.inputType = if (visible) {
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+        } else {
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        etPassword.typeface = savedTypeface
+        etPassword.setSelection(selection.coerceAtMost(etPassword.text?.length ?: 0))
+        suppressWatchers = false
+
+        btnTogglePassword.setImageResource(
+            if (visible) R.drawable.ic_eye_off else R.drawable.ic_eye
+        )
+        btnTogglePassword.contentDescription =
+            if (visible) "Ẩn mật khẩu" else "Hiện mật khẩu"
+    }
+
+    private fun setPausedFlag(paused: Boolean) {
+        isUserInteracting = paused
+        RemoteControlHub.isCountdownPaused = paused
+        if (::btnToggleCountdown.isInitialized) {
+            updateCountdownToggleUi()
+        }
+    }
+
+    private fun updateCountdownToggleUi() {
+        btnToggleCountdown.text = if (isUserInteracting) "Tiếp tục" else "Tạm dừng"
+    }
+
+    private fun showWarning(message: String) {
+        tvWarning.text = message
+        layoutWarning.visibility = View.VISIBLE
+    }
+
+    private fun hideWarning() {
+        tvWarning.text = ""
+        layoutWarning.visibility = View.GONE
+    }
+
+    private fun pauseCountdown(reason: String) {
+        setPausedFlag(true)
+        countDownTimer?.cancel()
+        countDownTimer = null
+        RemoteControlHub.countdownSeconds = -1
+        layoutCountdown.visibility = View.VISIBLE
+        tvCountdown.text = reason
+    }
+
+    private fun resumeCountdown() {
+        val typedUser = etUsername.text.toString().trim()
+        val typedPass = etPassword.text.toString().trim()
+        val settings = if (typedUser.isNotEmpty() && typedPass.isNotEmpty()) {
+            AppConfig.saveCredentials(this, typedUser, typedPass)
+        } else {
+            AppConfig.load(this)
+        }
+
+        if (!settings.hasCredentials()) {
+            showWarning("Chưa có thông tin đăng nhập. Vui lòng nhập tài khoản và mật khẩu.")
+            return
+        }
+
+        setPausedFlag(false)
+        layoutCountdown.visibility = View.VISIBLE
+        if (isNetworkConnected) {
+            startCountdown()
+        } else {
+            RemoteControlHub.countdownSeconds = -1
+            tvCountdown.text = "Đang chờ kết nối mạng để tự động đếm ngược..."
+        }
+    }
+
+    private fun populateFields(settings: AppSettings) {
+        suppressWatchers = true
+        etUsername.setText(settings.username)
+        etPassword.setText(settings.password)
+        suppressWatchers = false
+    }
+
+    private fun formatLanBannerText(localUrl: String, ipUrl: String?): String {
+        val isCompactPortrait =
+            resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT &&
+                resources.configuration.smallestScreenWidthDp < 600
+        return when {
+            ipUrl.isNullOrBlank() -> "Điều khiển LAN: $localUrl"
+            isCompactPortrait -> "Điều khiển LAN: $localUrl\nIP trực tiếp: $ipUrl"
+            else -> "Điều khiển LAN: $localUrl  •  $ipUrl"
+        }
+    }
+
+    private fun updateLanBanner() {
+        val settings = AppConfig.load(this)
+        val hostLabel = runCatching { URI(settings.targetUrl).host }
+            .getOrNull().orEmpty().ifEmpty { "diemdanhhs.com" }
+        tvVersionSubtitle.text =
+            "Phiên bản v${BuildConfig.VERSION_NAME} • Máy chủ: $hostLabel • LAN: ${BuildConfig.CONTROL_SERVER_PORT}"
+
+        val (localUrl, ipUrl) = RemoteControlHub.getControlUrls()
+        tvLanInfo.text = formatLanBannerText(localUrl, ipUrl)
+    }
+
+    private fun startCountdown() {
+        if (!isNetworkConnected || isUserInteracting) return
+        layoutCountdown.visibility = View.VISIBLE
+        updateCountdownToggleUi()
+        countDownTimer?.cancel()
+        countDownTimer = object : CountDownTimer(30_000, 1_000) {
+            override fun onTick(millisUntilFinished: Long) {
+                val seconds = (millisUntilFinished / 1000).toInt()
+                RemoteControlHub.countdownSeconds = seconds
+                tvCountdown.text = "Tự động mở màn hình điểm danh sau ${seconds}s..."
+            }
+
+            override fun onFinish() {
+                countDownTimer = null
+                RemoteControlHub.countdownSeconds = -1
+                if (!isFinishing && isNetworkConnected && !isUserInteracting) {
+                    val current = AppConfig.load(this@MainActivity)
+                    if (current.hasCredentials()) {
+                        navigateToWebView(current)
+                    }
+                }
+            }
+        }.start()
     }
 
     private fun navigateToWebView(settings: AppSettings) {
         countDownTimer?.cancel()
+        countDownTimer = null
         RemoteControlHub.countdownSeconds = -1
         val intent = Intent(this, WebViewActivity::class.java).apply {
-            putExtra(EXTRA_USERNAME, settings.username)
-            putExtra(EXTRA_PASSWORD, settings.password)
-            putExtra(EXTRA_TARGET_URL, settings.targetUrl)
+            putExtra("username", settings.username)
+            putExtra("password", settings.password)
+            putExtra("target_url", settings.targetUrl)
         }
         startActivity(intent)
         finish()
     }
 
-    private fun maybePromptOverlayPermission(settings: AppSettings) {
-        if (Settings.canDrawOverlays(this) || settings.overlayPrompted) return
-
-        isOverlayDialogShowing = true
-        countDownTimer?.cancel()
-        RemoteControlHub.countdownSeconds = -1
-        AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
-            .setTitle("Cấp quyền tự khởi động Android Box")
-            .setMessage("Để ứng dụng tự động mở lại sau khi Android Box khởi động, vui lòng bật quyền 'Hiển thị trên các ứng dụng khác'.")
-            .setPositiveButton("Mở Cài đặt") { _, _ ->
-                isOverlayDialogShowing = false
-                waitingOverlaySettingsReturn = true
-                AppConfig.markOverlayPrompted(this)
-                runCatching {
-                    startActivity(
-                        Intent(
-                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                            Uri.parse("package:$packageName")
-                        )
-                    )
-                }.onFailure {
-                    waitingOverlaySettingsReturn = false
-                }
-            }
-            .setNegativeButton("Để sau") { _, _ ->
-                isOverlayDialogShowing = false
-                AppConfig.markOverlayPrompted(this)
-                val current = AppConfig.load(this)
-                if (current.hasCredentials() && isNetworkConnected && !isUserInteracting && !isUpdateFlowActive) {
-                    startCountdown(current)
-                }
-            }
-            .setCancelable(false)
-            .show()
-    }
-
-    private fun maybeAutoCheckUpdateOnLaunch(settings: AppSettings) {
-        if (!AppConfig.isValidGithubRepo(settings.githubRepo)) return
-        if (!NetworkMonitor.hasInternetAccess(this)) return
-        RemoteControlHub.triggerUpdateCheck(isAutoCheck = true) {
-            handleHubUpdateResult(isAutoCheck = true)
-        }
-    }
-
-    private fun handleHubUpdateResult(isAutoCheck: Boolean) {
-        if (isFinishing || isDestroyed) return
-        val release = RemoteControlHub.latestRelease
-        if (RemoteControlHub.updateState == "AVAILABLE" && release != null) {
-            isUpdateFlowActive = true
-            countDownTimer?.cancel()
-            RemoteControlHub.countdownSeconds = -1
-            tvCountdown.text = "Đã tìm thấy bản cập nhật ${release.tagName}"
-            tvUpdateStatus.text = "Có bản mới: ${release.tagName} (${release.assetName})"
-            showUpdateConfirmDialog(release)
-        } else if (!isAutoCheck) {
-            tvUpdateStatus.text = RemoteControlHub.updateMessage
-        }
-    }
-
-    private fun showUpdateConfirmDialog(release: ReleaseInfo) {
-        val notes = release.releaseNotes.ifBlank { "Bản cập nhật mới từ GitHub Releases." }
-        val sizeMb = if (release.fileSizeBytes > 0) {
-            String.format(java.util.Locale.US, "%.1f MB", release.fileSizeBytes / (1024.0 * 1024.0))
-        } else {
-            "Không rõ dung lượng"
-        }
-
-        AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
-            .setTitle("Cập nhật CardReader ${release.tagName}")
-            .setMessage("Phiên bản hiện tại: v${BuildConfig.VERSION_NAME}\nPhiên bản mới: ${release.tagName} ($sizeMb)\n\n$notes")
-            .setPositiveButton("Tải và Cài đặt") { _, _ ->
-                startApkDownloadAndInstall(release)
-            }
-            .setNegativeButton("Bỏ qua") { _, _ ->
-                isUpdateFlowActive = false
-                val current = AppConfig.load(this)
-                if (current.hasCredentials() && isNetworkConnected && !isUserInteracting) {
-                    startCountdown(current)
-                }
-            }
-            .setCancelable(false)
-            .show()
-    }
-
-    private fun startApkDownloadAndInstall(release: ReleaseInfo) {
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(48, 32, 48, 24)
-        }
-        val statusText = TextView(this).apply {
-            text = "Đang tải ${release.assetName}..."
-            textSize = 14f
-        }
-        val progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            max = 100
-            progress = 0
-            setPadding(0, 24, 0, 0)
-        }
-        container.addView(statusText)
-        container.addView(progressBar)
-
-        downloadDialog?.dismiss()
-        downloadDialog = AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
-            .setTitle("Đang tải bản cập nhật")
-            .setView(container)
-            .setCancelable(false)
-            .show()
-
-        RemoteControlHub.downloadAndPrepareInstall(
-            release = release,
-            onProgress = { percent ->
-                progressBar.progress = percent
-                statusText.text = "Đang tải ${release.assetName}: $percent%"
-            },
-            onReady = { apkFile ->
-                downloadDialog?.dismiss()
-                downloadDialog = null
-                if (!isFinishing && !isDestroyed) {
-                    installDownloadedApk(apkFile)
-                }
-            },
-            onError = { errMsg ->
-                downloadDialog?.dismiss()
-                downloadDialog = null
-                isUpdateFlowActive = false
-                tvUpdateStatus.text = "Tải cập nhật thất bại: $errMsg"
-            }
-        )
-    }
-
-    private fun installDownloadedApk(apkFile: File) {
-        if (!packageManager.canRequestPackageInstalls()) {
-            pendingInstallApk = apkFile
-            AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
-                .setTitle("Cấp quyền cài đặt APK")
-                .setMessage("Android yêu cầu bật quyền 'Cài đặt ứng dụng không xác định' cho CardReader để hoàn tất nâng cấp.")
-                .setPositiveButton("Mở Cài đặt") { _, _ ->
-                    val intent = Intent(
-                        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                        Uri.parse("package:$packageName")
-                    )
-                    installPermissionLauncher.launch(intent)
-                }
-                .setNegativeButton("Hủy") { _, _ ->
-                    pendingInstallApk = null
-                    isUpdateFlowActive = false
-                }
-                .setCancelable(false)
-                .show()
-            return
-        }
-        launchApkInstaller(apkFile)
-    }
-
-    private fun launchApkInstaller(apkFile: File) {
-        isUpdateFlowActive = false
-        tvUpdateStatus.text = "Đang mở trình cài đặt APK..."
-        runCatching {
-            startActivity(GitHubUpdater.buildInstallIntent(this, apkFile))
-        }.onFailure { err ->
-            tvUpdateStatus.text = "Không thể mở trình cài đặt: ${err.message}"
-        }
-    }
-
     override fun onRemoteConfigUpdated(settings: AppSettings) {
         populateFields(settings)
-        updateSummaryText(settings)
-        layoutWarning.visibility = View.GONE
+        updateDomainButtonsState(settings.targetUrl)
+        updateLanBanner()
+        if (settings.hasCredentials() && isNetworkConnected) {
+            hideWarning()
+            if (!isUserInteracting && countDownTimer == null) {
+                startCountdown()
+            }
+        }
     }
 
     override fun onRemoteCommand(action: String) {
-        when {
-            action == "connect" -> {
+        when (action) {
+            "connect" -> {
                 val current = AppConfig.load(this)
                 if (current.hasCredentials()) {
+                    setPausedFlag(false)
                     navigateToWebView(current)
                 }
             }
-            action == "stop_countdown" -> {
-                stopCountdownByUser("Đã dừng đếm ngược từ trang điều khiển LAN.")
+            "stop_countdown" -> {
+                pauseCountdown("Đã tạm dừng đếm ngược từ trang điều khiển LAN.")
             }
-            action.startsWith("install_apk:") -> {
-                val path = action.removePrefix("install_apk:")
-                val apk = File(path)
-                if (apk.exists()) {
-                    isUpdateFlowActive = true
-                    countDownTimer?.cancel()
-                    installDownloadedApk(apk)
-                }
+            "resume_countdown" -> {
+                resumeCountdown()
             }
         }
     }
 
     override fun onLanEndpointChanged(localUrl: String, ipUrl: String?) {
-        tvLanLocalUrl.text = localUrl
-        tvLanIpUrl.text = if (!ipUrl.isNullOrBlank()) {
-            "Hoặc truy cập trực tiếp: $ipUrl"
-        } else {
-            "Đang chờ địa chỉ IP từ mạng LAN..."
-        }
+        tvLanInfo.text = formatLanBannerText(localUrl, ipUrl)
     }
 
-    override fun onHubUpdateStateChanged() {
-        if (RemoteControlHub.updateState != "IDLE") {
-            tvUpdateStatus.text = RemoteControlHub.updateMessage
+    override fun onUpdateStatusChanged(state: String, message: String, progress: Int) {
+        btnGithubUpdate.isEnabled = state != "CHECKING" && state != "DOWNLOADING"
+        btnGithubUpdate.text = when (state) {
+            "CHECKING" -> "Đang kiểm tra GitHub..."
+            "DOWNLOADING" -> "Đang tải APK ($progress%)..."
+            "AVAILABLE" -> "Cài bản mới ngay"
+            "UP_TO_DATE" -> "Đang ở bản mới nhất"
+            else -> "Kiểm tra cập nhật GitHub"
+        }
+        if (state == "ERROR") {
+            showWarning(message)
+        } else {
+            layoutCountdown.visibility = View.VISIBLE
+            tvCountdown.text = message
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         countDownTimer?.cancel()
-        downloadDialog?.dismiss()
+        countDownTimer = null
         networkMonitor?.unregister()
         RemoteControlHub.detachListener(this)
-    }
-
-    companion object {
-        const val EXTRA_USERNAME = "username"
-        const val EXTRA_PASSWORD = "password"
-        const val EXTRA_TARGET_URL = "target_url"
-        const val EXTRA_PAUSE_AUTO_CONNECT = "pause_auto_connect"
-        const val EXTRA_PENDING_APK_PATH = "pending_apk_path"
     }
 }

@@ -5,6 +5,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 
@@ -51,19 +52,19 @@ class NetworkMonitor(
             }
 
             override fun onLost(network: Network) {
-                // Delay briefly so interface handoffs (Wi-Fi <-> Ethernet) do not trigger false disconnects
-                scheduleCheck(delayMs = 450L)
+                // Trì hoãn ngắn để chuyển giao Wi-Fi <-> Ethernet/4G không gây thoát màn hình giả
+                scheduleCheck(delayMs = 1200L)
             }
         }
         callback = cb
 
-        val request = NetworkRequest.Builder()
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-            .build()
+        val request = NetworkRequest.Builder().build()
         try {
             connectivityManager.registerNetworkCallback(request, cb)
         } catch (_: Exception) {
-            connectivityManager.registerDefaultNetworkCallback(cb)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                runCatching { connectivityManager.registerDefaultNetworkCallback(cb) }
+            }
         }
     }
 

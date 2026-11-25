@@ -6,11 +6,9 @@ import android.os.Handler
 import android.os.Looper
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -23,19 +21,20 @@ interface RemoteScreenListener {
     fun onRemoteConfigUpdated(settings: AppSettings)
     fun onRemoteCommand(action: String)
     fun onLanEndpointChanged(localUrl: String, ipUrl: String?)
-    fun onHubUpdateStateChanged()
+    fun onUpdateStatusChanged(state: String, message: String, progress: Int) {}
 }
 
 /**
- * Process-level coordinator that keeps the LAN Web Control Server (:8080) and mDNS
- * responder (`diemdanh.local`) running across Activity transitions on the Android TV Box.
+ * Điều phối viên cấp tiến trình giữ Web Control Server cổng 8888, mDNS (`diemdanh.local`)
+ * và trình cập nhật OTA qua GitHub Releases hoạt động xuyên suốt giữa các màn hình.
  */
 object RemoteControlHub : ControlServerDelegate {
 
     private val initialized = AtomicBoolean(false)
+    private val updateBusy = AtomicBoolean(false)
     private lateinit var appContext: Context
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val ioExecutor: ExecutorService = Executors.newCachedThreadPool()
+    private val updateExecutor = Executors.newSingleThreadExecutor()
 
     private var mdnsAdvertiser: MdnsAdvertiser? = null
     private var controlServer: LocalControlServer? = null
@@ -49,6 +48,9 @@ object RemoteControlHub : ControlServerDelegate {
     var countdownSeconds: Int = -1
 
     @Volatile
+    var isCountdownPaused: Boolean = false
+
+    @Volatile
     var activeWebUrl: String = ""
 
     @Volatile
@@ -58,19 +60,23 @@ object RemoteControlHub : ControlServerDelegate {
     var lastError: String = ""
 
     @Volatile
-    var updateState: String = "IDLE"
+    var currentLanIp: String? = null
+        private set
 
     @Volatile
-    var updateMessage: String = "Chưa kiểm tra cập nhật."
+    var updateState: String = "IDLE"
+        private set
+
+    @Volatile
+    var updateMessage: String = "Chưa kiểm tra cập nhật"
+        private set
+
+    @Volatile
+    var updateProgress: Int = -1
+        private set
 
     @Volatile
     var latestRelease: ReleaseInfo? = null
-
-    @Volatile
-    var downloadProgress: Int = 0
-
-    @Volatile
-    var currentLanIp: String? = null
         private set
 
     @Volatile
@@ -148,102 +154,122 @@ object RemoteControlHub : ControlServerDelegate {
     }
 
     fun addLog(message: String) {
+        val sanitized = message.replace(Regex("(?i)(password|pin|token)=([^&\\s]+)"), "$1=***")
         val stamp = synchronized(timeFormat) { timeFormat.format(Date()) }
         synchronized(logs) {
             if (logs.size >= 60) logs.removeFirst()
-            logs.addLast("[$stamp] $message")
+            logs.addLast("[$stamp] $sanitized")
         }
     }
 
-    fun triggerUpdateCheck(isAutoCheck: Boolean, onDone: (() -> Unit)? = null) {
-        val settings = AppConfig.load(appContext)
-        val repo = settings.githubRepo
-        if (!AppConfig.isValidGithubRepo(repo)) {
-            if (!isAutoCheck) {
-                updateState = "ERROR"
-                updateMessage = "Chưa cấu hình GitHub repo (owner/repo)."
-                notifyUpdateStateChanged()
-            }
-            onDone?.invoke()
-            return
-        }
-        if (!NetworkMonitor.hasInternetAccess(appContext)) {
-            if (!isAutoCheck) {
-                updateState = "ERROR"
-                updateMessage = "Cần kết nối Internet để kiểm tra GitHub Releases."
-                notifyUpdateStateChanged()
-            }
-            onDone?.invoke()
-            return
-        }
+    fun checkGitHubUpdateAsync(autoInstallIfAvailable: Boolean = false) {
+        if (!updateBusy.compareAndSet(false, true)) return
+        val repo = AppConfig.load(appContext).githubRepo
+        publishUpdateStatus("CHECKING", "Đang kiểm tra bản mới trên GitHub ($repo)...", -1)
+        addLog("Kiểm tra bản cập nhật GitHub: $repo")
 
-        updateState = "CHECKING"
-        updateMessage = "Đang kiểm tra $repo..."
-        notifyUpdateStateChanged()
-
-        ioExecutor.execute {
-            val result = GitHubUpdater.checkLatestRelease(repo, BuildConfig.VERSION_NAME)
-            when (result) {
-                is UpdateCheckResult.NotConfigured -> {
-                    updateState = "IDLE"
-                    updateMessage = "Chưa cấu hình GitHub repo."
-                }
-                is UpdateCheckResult.UpToDate -> {
-                    latestRelease = null
-                    updateState = "UP_TO_DATE"
-                    updateMessage = "Đang ở bản mới nhất (${result.latestTag})."
-                    if (!isAutoCheck) addLog("Kiểm tra cập nhật: đang ở bản mới nhất (${result.latestTag})")
-                }
-                is UpdateCheckResult.Error -> {
-                    updateState = "ERROR"
-                    updateMessage = result.message
-                    if (!isAutoCheck) addLog("Lỗi kiểm tra cập nhật: ${result.message}")
-                }
-                is UpdateCheckResult.UpdateAvailable -> {
-                    latestRelease = result.release
-                    updateState = "AVAILABLE"
-                    updateMessage = "Có bản mới ${result.release.tagName} (${result.release.assetName})"
-                    addLog("Phát hiện bản mới trên GitHub: ${result.release.tagName}")
-                }
-            }
-            notifyUpdateStateChanged()
-            mainHandler.post { onDone?.invoke() }
-        }
-    }
-
-    fun downloadAndPrepareInstall(
-        release: ReleaseInfo,
-        onProgress: ((Int) -> Unit)? = null,
-        onReady: (File) -> Unit,
-        onError: (String) -> Unit
-    ) {
-        updateState = "DOWNLOADING"
-        downloadProgress = 0
-        updateMessage = "Đang tải ${release.assetName}"
-        notifyUpdateStateChanged()
-        addLog("Bắt đầu tải bản cập nhật ${release.tagName}...")
-
-        ioExecutor.execute {
+        updateExecutor.execute {
             try {
-                val apkFile = GitHubUpdater.downloadApk(appContext, release) { percent ->
-                    downloadProgress = percent
-                    updateMessage = "Đang tải ${release.assetName}"
-                    mainHandler.post { onProgress?.invoke(percent) }
+                when (val res = GitHubUpdater.checkLatestRelease(repo, BuildConfig.VERSION_NAME)) {
+                    is UpdateCheckResult.NotConfigured -> {
+                        publishUpdateStatus("ERROR", "Chưa cấu hình kho GitHub hợp lệ.", -1)
+                    }
+                    is UpdateCheckResult.UpToDate -> {
+                        latestRelease = null
+                        val msg = "Đang ở bản mới nhất (v${BuildConfig.VERSION_NAME})"
+                        publishUpdateStatus("UP_TO_DATE", msg, -1)
+                        addLog(msg)
+                    }
+                    is UpdateCheckResult.UpdateAvailable -> {
+                        latestRelease = res.release
+                        val sizeMb = String.format(Locale.US, "%.1f MB", res.release.fileSizeBytes / 1048576.0)
+                        val msg = "Có bản mới ${res.release.tagName} ($sizeMb) trên GitHub!"
+                        publishUpdateStatus("AVAILABLE", msg, -1)
+                        addLog(msg)
+                        if (autoInstallIfAvailable) {
+                            updateBusy.set(false)
+                            downloadAndInstallLatestAsync()
+                            return@execute
+                        }
+                    }
+                    is UpdateCheckResult.Error -> {
+                        publishUpdateStatus("ERROR", res.message, -1)
+                        addLog("Cập nhật GitHub: ${res.message}")
+                    }
                 }
-                updateState = "READY_TO_INSTALL"
-                downloadProgress = 100
-                updateMessage = "Đã tải xong ${release.assetName}, đang mở trình cài đặt..."
-                addLog("Đã tải xong ${release.assetName}")
-                notifyUpdateStateChanged()
-                mainHandler.post { onReady(apkFile) }
-            } catch (e: Exception) {
-                val msg = e.message ?: "Lỗi tải APK"
-                updateState = "ERROR"
-                updateMessage = "Tải cập nhật thất bại: $msg"
-                addLog("Tải cập nhật thất bại: $msg")
-                notifyUpdateStateChanged()
-                mainHandler.post { onError(msg) }
+            } finally {
+                updateBusy.set(false)
             }
+        }
+    }
+
+    fun downloadAndInstallLatestAsync() {
+        if (!updateBusy.compareAndSet(false, true)) return
+        updateExecutor.execute {
+            try {
+                var targetRelease = latestRelease
+                if (targetRelease == null) {
+                    val repo = AppConfig.load(appContext).githubRepo
+                    publishUpdateStatus("CHECKING", "Đang lấy thông tin bản mới từ GitHub...", 0)
+                    when (val res = GitHubUpdater.checkLatestRelease(repo, BuildConfig.VERSION_NAME)) {
+                        is UpdateCheckResult.UpdateAvailable -> {
+                            targetRelease = res.release
+                            latestRelease = res.release
+                        }
+                        is UpdateCheckResult.UpToDate -> {
+                            publishUpdateStatus("UP_TO_DATE", "Thiết bị đang ở bản mới nhất (v${BuildConfig.VERSION_NAME}).", -1)
+                            return@execute
+                        }
+                        is UpdateCheckResult.Error -> {
+                            publishUpdateStatus("ERROR", res.message, -1)
+                            return@execute
+                        }
+                        is UpdateCheckResult.NotConfigured -> {
+                            publishUpdateStatus("ERROR", "Chưa cấu hình kho GitHub.", -1)
+                            return@execute
+                        }
+                    }
+                }
+
+                val rel = targetRelease ?: return@execute
+                addLog("Đang tải bản cập nhật ${rel.tagName} (${rel.assetName})...")
+                publishUpdateStatus("DOWNLOADING", "Đang tải ${rel.tagName} (0%)...", 0)
+
+                val apkFile = GitHubUpdater.downloadApk(appContext, rel) { pct ->
+                    publishUpdateStatus("DOWNLOADING", "Đang tải ${rel.tagName} ($pct%)...", pct)
+                }
+
+                val installIntent = GitHubUpdater.buildInstallIntent(appContext, apkFile)
+                publishUpdateStatus(
+                    "READY_INSTALL",
+                    "Đã tải xong ${rel.tagName}. Đang mở trình cài đặt trên thiết bị...",
+                    100
+                )
+                addLog("Đã tải xong ${rel.tagName}, mở trình cài đặt APK")
+                mainHandler.post {
+                    runCatching { appContext.startActivity(installIntent) }
+                        .onFailure { err ->
+                            val msg = "Không mở được trình cài đặt: ${err.message ?: "Thiếu quyền cài đặt"}"
+                            publishUpdateStatus("ERROR", msg, -1)
+                            addLog(msg)
+                        }
+                }
+            } catch (e: Exception) {
+                val msg = e.message ?: "Lỗi khi tải bản cập nhật từ GitHub"
+                publishUpdateStatus("ERROR", msg, -1)
+                addLog("Lỗi tải APK cập nhật: $msg")
+            } finally {
+                updateBusy.set(false)
+            }
+        }
+    }
+
+    private fun publishUpdateStatus(state: String, message: String, progress: Int) {
+        updateState = state
+        updateMessage = message
+        updateProgress = progress
+        mainHandler.post {
+            activeListener?.onUpdateStatusChanged(state, message, progress)
         }
     }
 
@@ -257,12 +283,14 @@ object RemoteControlHub : ControlServerDelegate {
         return JSONObject().apply {
             put("versionName", BuildConfig.VERSION_NAME)
             put("versionCode", BuildConfig.VERSION_CODE)
+            put("port", BuildConfig.CONTROL_SERVER_PORT)
             put("locked", !authorized)
             put("hasAdminPin", settings.hasAdminPin())
 
             if (authorized) {
                 put("currentScreen", currentScreen.name)
                 put("countdownSeconds", if (currentScreen == RemoteScreen.MAIN) countdownSeconds else -1)
+                put("countdownPaused", isCountdownPaused)
                 put("username", settings.username)
                 put("hasPassword", settings.hasCredentials())
                 put("targetUrl", settings.targetUrl)
@@ -276,10 +304,14 @@ object RemoteControlHub : ControlServerDelegate {
                 put("internetConnected", NetworkMonitor.hasInternetAccess(appContext))
                 put("loginState", loginState)
                 put("lastError", lastError)
+
                 put("updateState", updateState)
                 put("updateMessage", updateMessage)
-                put("downloadProgress", downloadProgress)
-                put("canInstallUpdate", latestRelease != null && updateState != "DOWNLOADING")
+                put("updateProgress", updateProgress)
+                val rel = latestRelease
+                put("updateAvailable", rel != null)
+                put("latestVersion", rel?.tagName ?: "")
+                put("latestNotes", rel?.releaseNotes ?: "")
 
                 val logArray = JSONArray()
                 synchronized(logs) {
@@ -296,7 +328,7 @@ object RemoteControlHub : ControlServerDelegate {
         val rawPass = if (json.has("password")) json.optString("password", "") else null
         val newTargetUrl = json.optString("targetUrl", prev.targetUrl)
         val newMdns = json.optString("mdnsHostname", prev.mdnsHostname)
-        val newRepo = json.optString("githubRepo", prev.githubRepo)
+        val newRepo = if (json.has("githubRepo")) json.optString("githubRepo", prev.githubRepo) else null
         val clearPin = json.optBoolean("clearPin", false)
         val rawPin = if (json.has("adminPin")) json.optString("adminPin", "").trim() else ""
         val pinToSave = when {
@@ -320,7 +352,7 @@ object RemoteControlHub : ControlServerDelegate {
             updateMdnsHostname(updated.mdnsHostname)
         }
         clearWebSessionsIfNeeded(prev.adminPin, updated.adminPin)
-        addLog("Đã cập nhật cấu hình từ web LAN (User: ${updated.username}, URL: ${updated.targetUrl})")
+        addLog("Đã cập nhật cấu hình từ web LAN (Tài khoản: ${updated.username.ifEmpty { "trống" }}, URL: ${updated.targetUrl})")
 
         val applyAndConnect = json.optBoolean("applyAndConnect", false)
         mainHandler.post {
@@ -334,7 +366,7 @@ object RemoteControlHub : ControlServerDelegate {
             put("ok", true)
             put(
                 "message",
-                if (applyAndConnect) "Đã lưu cấu hình và đang áp dụng vào WebView" else "Đã lưu cấu hình lên TV Box"
+                if (applyAndConnect) "Đã lưu cấu hình và đang mở WebView" else "Đã lưu cấu hình lên thiết bị"
             )
         }
     }
@@ -343,16 +375,14 @@ object RemoteControlHub : ControlServerDelegate {
         addLog("Nhận lệnh điều khiển từ LAN: $action")
         val settings = AppConfig.load(appContext)
 
-        when (action) {
+        return when (action) {
             "connect" -> {
                 if (!settings.hasCredentials()) {
-                    return JSONObject().apply {
-                        put("ok", false)
-                        put("message", "Chưa có tài khoản hoặc mật khẩu. Hãy nhập trước.")
-                    }
+                    jsonResult(false, "Chưa có tài khoản hoặc mật khẩu. Hãy lưu thông tin trước.")
+                } else {
+                    mainHandler.post { dispatchConnectCommand(settings) }
+                    jsonResult(true, "Đang chuyển sang màn hình WebView...")
                 }
-                mainHandler.post { dispatchConnectCommand(settings) }
-                return jsonResult(true, "Đang chuyển TV Box sang WebView...")
             }
 
             "open_settings" -> {
@@ -370,10 +400,10 @@ object RemoteControlHub : ControlServerDelegate {
                         appContext.startActivity(i)
                     }
                 }
-                return jsonResult(true, "Đang mở màn hình Cài đặt trên TV Box")
+                jsonResult(true, "Đang mở màn hình Cài đặt")
             }
 
-            "reload_webview", "relogin", "stop_countdown" -> {
+            "reload_webview", "relogin", "stop_countdown", "resume_countdown" -> {
                 mainHandler.post {
                     val listener = activeListener
                     if (listener != null) {
@@ -384,51 +414,25 @@ object RemoteControlHub : ControlServerDelegate {
                 }
                 val msg = when (action) {
                     "reload_webview" -> "Đã gửi lệnh tải lại trang WebView"
-                    "relogin" -> "Đã gửi lệnh đăng nhập lại"
-                    else -> "Đã dừng bộ đếm tự động kết nối"
+                    "relogin" -> "Đã gửi lệnh đăng xuất và đăng nhập lại"
+                    "resume_countdown" -> "Đã tiếp tục bộ đếm tự động kết nối"
+                    else -> "Đã tạm dừng bộ đếm tự động kết nối"
                 }
-                return jsonResult(true, msg)
+                jsonResult(true, msg)
             }
 
-            "check_update" -> {
-                triggerUpdateCheck(isAutoCheck = false)
-                return jsonResult(true, "Đang kiểm tra bản mới trên GitHub...")
-            }
-
-            "install_update" -> {
-                val release = latestRelease ?: return jsonResult(false, "Chưa có bản cập nhật nào sẵn sàng.")
-                if (updateState == "DOWNLOADING") {
-                    return jsonResult(false, "Đang tải bản cập nhật, vui lòng đợi...")
-                }
-                downloadAndPrepareInstall(
-                    release = release,
-                    onReady = { apkFile ->
-                        val listener = activeListener
-                        if (listener != null && currentScreen == RemoteScreen.MAIN) {
-                            listener.onRemoteCommand("install_apk:${apkFile.absolutePath}")
-                        } else if (appContext.packageManager.canRequestPackageInstalls()) {
-                            runCatching {
-                                appContext.startActivity(GitHubUpdater.buildInstallIntent(appContext, apkFile))
-                            }.onFailure { err ->
-                                addLog("Không mở được trình cài đặt APK: ${err.message}")
-                            }
-                        } else {
-                            // Bring MainActivity forward to ask for Unknown Sources permission
-                            val i = Intent(appContext, MainActivity::class.java).apply {
-                                putExtra(MainActivity.EXTRA_PENDING_APK_PATH, apkFile.absolutePath)
-                                putExtra(MainActivity.EXTRA_PAUSE_AUTO_CONNECT, true)
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                            }
-                            appContext.startActivity(i)
-                        }
-                    },
-                    onError = {}
-                )
-                return jsonResult(true, "Đang tải APK ${release.tagName} về TV Box...")
-            }
-
-            else -> return jsonResult(false, "Lệnh không được hỗ trợ: $action")
+            else -> jsonResult(false, "Lệnh không được hỗ trợ: $action")
         }
+    }
+
+    override fun handleUpdateCheck(): JSONObject {
+        checkGitHubUpdateAsync(autoInstallIfAvailable = false)
+        return jsonResult(true, "Đang kiểm tra bản cập nhật mới nhất trên GitHub...")
+    }
+
+    override fun handleUpdateInstall(): JSONObject {
+        downloadAndInstallLatestAsync()
+        return jsonResult(true, "Đang tải và khởi chạy cài đặt bản cập nhật từ GitHub...")
     }
 
     private fun dispatchConnectCommand(settings: AppSettings) {
@@ -437,9 +441,9 @@ object RemoteControlHub : ControlServerDelegate {
             listener.onRemoteCommand("connect")
         } else {
             val intent = Intent(appContext, WebViewActivity::class.java).apply {
-                putExtra(MainActivity.EXTRA_USERNAME, settings.username)
-                putExtra(MainActivity.EXTRA_PASSWORD, settings.password)
-                putExtra(MainActivity.EXTRA_TARGET_URL, settings.targetUrl)
+                putExtra("username", settings.username)
+                putExtra("password", settings.password)
+                putExtra("target_url", settings.targetUrl)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
             }
             appContext.startActivity(intent)
@@ -450,12 +454,6 @@ object RemoteControlHub : ControlServerDelegate {
         val (mdnsUrl, ipUrl) = getControlUrls()
         mainHandler.post {
             activeListener?.onLanEndpointChanged(mdnsUrl, ipUrl)
-        }
-    }
-
-    private fun notifyUpdateStateChanged() {
-        mainHandler.post {
-            activeListener?.onHubUpdateStateChanged()
         }
     }
 
